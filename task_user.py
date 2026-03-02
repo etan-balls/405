@@ -249,7 +249,20 @@ class task_user:
                         self._lf_print_ms = now_ms
                         err = self._line_err.get()
                         t_s = elapsed / 1000.0
-                        self._io.write("LF,{:.3f},{:.4f}\r\n".format(t_s, err))
+                        imu_h = None
+                        imu_w = None
+                        if self._imu_heading is not None:
+                            try:
+                                imu_h = self._imu_heading.get()
+                            except Exception:
+                                imu_h = None
+                        if self._imu_yawrate is not None:
+                            try:
+                                imu_w = self._imu_yawrate.get()
+                            except Exception:
+                                imu_w = None
+
+                        self._io.write("LF,{:.3f},{:.4f},{},{}\r\n".format(t_s, err, imu_h, imu_w))
 
                 if elapsed >= LF_DURATION_MS:
                     self._disarm()

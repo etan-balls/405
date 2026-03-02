@@ -51,6 +51,9 @@ class task_control:
         other_effort_cmd: Share = None,
         other_goFlag: Share = None,
         base_effort_share: Share = None,
+        # --- IMU stabilization (optional) ---
+        imu_heading_share: Share = None,
+        imu_yawrate_share: Share = None,
         # Backwards-compatible alias name:
         line_error_share: Share = None,
         max_vel_share: Share = None,
@@ -81,6 +84,13 @@ class task_control:
         self._other_effort_cmd = other_effort_cmd
         self._other_goFlag = other_goFlag
         self._base_effort_share = base_effort_share
+
+        # IMU stabilization (optional)
+        self._imu_heading_share = imu_heading_share
+        self._imu_yawrate_share = imu_yawrate_share
+        self._k_yawrate = 0.0   # steer damping gain using gyro Z (deg/s)
+        self._k_heading = 0.0   # heading hold gain using Euler heading (deg)
+        self._heading_ref = None
 
         # Common timing/logging
         self._startTime = 0
@@ -169,13 +179,34 @@ class task_control:
 
         return target
 
-    # ---------------- Line-mode API ----------------
+    
+    # --------- Helpers: angle math ---------
+    @staticmethod
+    def _wrap_deg(angle_deg: float) -> float:
+        """Wrap angle to [-180, 180)."""
+        a = angle_deg
+        while a >= 180.0:
+            a -= 360.0
+        while a < -180.0:
+            a += 360.0
+        return a
+
+# ---------------- Line-mode API ----------------
     def set_base_effort(self, base_effort: float) -> None:
         self._base_effort_local = float(base_effort)
 
     def set_line_gains(self, kp: float, kd: float = 0.0) -> None:
         self._kp_line = float(kp)
         self._kd_line = float(kd)
+
+    # IMU stabilization gains
+    def set_imu_gains(self, yawrate_gain: float = 0.0, heading_gain: float = 0.0) -> None:
+        """Set gains used in line-follow mode.
+        yawrate_gain: multiplies gyro Z (deg/s) as a damping term.
+        heading_gain: multiplies (heading - heading_ref) to reduce drift.
+        """
+        self._k_yawrate = float(yawrate_gain)
+        self._k_heading = float(heading_gain)
 
     def _get_base_effort(self) -> float:
         if self._base_effort_share is None:
@@ -240,6 +271,16 @@ class task_control:
                     # reset line controller memory
                     self._err_prev = 0.0
 
+                    # latch heading reference for heading-hold (optional)
+                    self._heading_ref = None
+                    if self._line_mode_enabled() and (self._imu_heading_share is not None):
+                        try:
+                            h0 = self._imu_heading_share.get()
+                            if h0 is not None:
+                                self._heading_ref = float(h0)
+                        except Exception:
+                            self._heading_ref = None
+
                     self._state = S2_RUN
 
             elif self._state == S2_RUN:
@@ -276,6 +317,27 @@ class task_control:
 
                     base = self._get_base_effort()
                     steer = (self._kp_line * err) + (self._kd_line * derr)
+
+                    # ---- IMU stabilization (optional) ----
+                    # Gyro Z damping (deg/s)
+                    if self._imu_yawrate_share is not None and self._k_yawrate != 0.0:
+                        try:
+                            wz = self._imu_yawrate_share.get()
+                            if wz is not None:
+                                # Subtract damping so positive yaw rate reduces further turning
+                                steer -= (self._k_yawrate * float(wz))
+                        except Exception:
+                            pass
+
+                    # Heading hold (degrees), referenced to heading at run start
+                    if self._imu_heading_share is not None and self._k_heading != 0.0 and (self._heading_ref is not None):
+                        try:
+                            h = self._imu_heading_share.get()
+                            if h is not None:
+                                h_err = self._wrap_deg(float(h) - float(self._heading_ref))
+                                steer -= (self._k_heading * h_err)
+                        except Exception:
+                            pass
 
                     left_out = base + steer
                     right_out = base - steer
