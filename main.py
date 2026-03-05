@@ -1,5 +1,5 @@
 import pyb
-from pyb import Pin, Timer
+from pyb import Pin, Timer, UART
 
 from motor_driver import motor_driver
 from encoder_driver import encoder
@@ -14,6 +14,16 @@ from task_user import task_user
 from task_share import Share
 from cotask import Task, task_list
 from gc import collect
+
+
+# -----------------
+# Bluetooth UART1 setup (HC-05 on PB6=TX, PB7=RX)
+# -----------------
+bt = UART(1, baudrate=9600, timeout=10)
+
+# Redirect the MicroPython REPL (and therefore all print/input) to UART3.
+# PuTTY connects to the HC-05 COM port at 115200 to see all output.
+pyb.repl_uart(bt)
 
 
 # -----------------
@@ -41,11 +51,14 @@ line = L_sensor(sensor_fun, black=black_adc, white=white_adc, bias=0.0, sensor_c
 # -----------------
 # Tuning parameters — edit these before flashing
 # -----------------
-BASE_EFFORT = 25.0   # base PWM % sent to both wheels (0-100)
+BASE_EFFORT = 15.0   # base PWM % sent to both wheels (0-100)
                      # start low (~20-25%) and raise until it moves reliably
-STEER_GAIN  = 0.08   # recommended starting point from calibration mode
+STEER_GAIN  = 0.4   # recommended starting point from calibration mode
 MAX_EFFORT  = 50.0   # hard ceiling on any single wheel PWM %
                      # must be > BASE_EFFORT or steering has no headroom
+RIGHT_TRIM  = 1.1   # scale factor to compensate for slower right motor
+                     # > 1.0 boosts right, < 1.0 cuts right
+                     # tune until both wheels spin at the same speed with 'r' vs 'l'
 
 
 # -----------------
@@ -102,11 +115,25 @@ ctrl_obj._max_effort = MAX_EFFORT
 motL_obj = task_motor(leftMotor,  leftMotorGo,  leftEffortCmd,  armEnable, invert=True)
 motR_obj = task_motor(rightMotor, rightMotorGo, rightEffortCmd, armEnable, invert=True)
 
+# Apply right motor trim by monkey-patching set_effort.
+# This scales every effort command sent to the right motor by RIGHT_TRIM
+# so both wheels spin at the same speed for a given command.
+_rightMotor_set_effort_orig = rightMotor.set_effort
+def _rightMotor_set_effort_trimmed(effort):
+    _rightMotor_set_effort_orig(effort * RIGHT_TRIM)
+rightMotor.set_effort = _rightMotor_set_effort_trimmed
+
 user_obj = task_user(
     leftMotorGo, rightMotorGo,
     lineFollowEnable,
     armEnable,
-    line
+    line,
+    leftEffortCmd=leftEffortCmd,
+    rightEffortCmd=rightEffortCmd,
+    leftEncoder=leftEncoder,
+    rightEncoder=rightEncoder,
+    leftMotorDriver=leftMotor,
+    rightMotorDriver=rightMotor,
 )
 
 
