@@ -27,16 +27,12 @@ class task_line_sensor:
                 self._state = S1_RUN
 
             elif self._state == S1_RUN:
-                # Only sample hardware when line-follow is actually enabled.
-                # When disabled, publish 0.0 so the controller sees a clean
-                # error and doesn't react to a stale reading on the next enable.
-                enabled = (self._en is None) or bool(self._en.get())
-                if enabled:
-                    e = self._line.calculate_error()
-                    if e is None:
-                        e = 0.0
-                    self._err.put(float(e))
-                else:
-                    self._err.put(0.0)
+                # Always sample and publish so task_user can read live error
+                # during line follow. Publishing 0.0 when not following is fine
+                # because task_control checks lineFollowEnable itself.
+                e = self._line.calculate_error()
+                if e is None:
+                    e = 0.0
+                self._err.put(float(e))
 
             yield self._state

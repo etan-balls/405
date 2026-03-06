@@ -51,6 +51,10 @@ class task_control:
         other_effort_cmd: Share = None,
         other_goFlag: Share = None,
         base_effort_share: Share = None,
+        right_trim_share: Share = None,   # multiplicative right-wheel trim (default 1.0)
+        # --- IMU stabilization (optional) ---
+        imu_heading_share: Share = None,
+        imu_yawrate_share: Share = None,
         # Backwards-compatible alias name:
         line_error_share: Share = None,
         max_vel_share: Share = None,
@@ -81,6 +85,15 @@ class task_control:
         self._other_effort_cmd = other_effort_cmd
         self._other_goFlag = other_goFlag
         self._base_effort_share = base_effort_share
+        self._right_trim_share  = right_trim_share
+        self._right_offset      = 0.0   # additive PWM offset for right wheel trim
+
+        # IMU stabilization (optional)
+        self._imu_heading_share = imu_heading_share
+        self._imu_yawrate_share = imu_yawrate_share
+        self._k_yawrate = 0.0   # steer damping gain using gyro Z (deg/s)
+        self._k_heading = 0.0   # heading hold gain using Euler heading (deg)
+        self._heading_ref = None
 
         # Common timing/logging
         self._startTime = 0
@@ -102,15 +115,67 @@ class task_control:
 
         # ---------------- Line-follow parameters ----------------
         self._kp_line = 22.0
+        self._ki_line = 0.0    # integral gain — set via ctrl_obj._ki_line in main.py
         self._kd_line = 2.0
         self._base_effort_local = 35.0  # % PWM (0..100); tune for your robot
         self._err_prev = 0.0
+        self._err_int_line = 0.0   # line error integrator
+
+        # ---------------- Odometry ----------------
+        # Dead-reckoning from encoder counts. Updated every control tick.
+        # Reset to zero at the start of each run (when goFlag goes True).
+        self._WHEEL_TRACK_MM = 147.0   # mm between wheel contact patches (Romi)
+        self._MM_PER_COUNT   = 0.15272 # (2*pi*35) / 1440
+        self._odo_x   = 0.0   # mm, global X (forward from start)
+        self._odo_y   = 0.0   # mm, global Y (left from start)
+        self._odo_h   = 0.0   # radians, heading (0 = straight ahead)
+        self._odo_dist = 0.0  # mm, total straight-line distance from start
+        self._enc_l_prev = 0  # previous left encoder count
+        self._enc_r_prev = 0  # previous right encoder count
+        # reference to right encoder (must be set from main.py after construction)
+        self._right_enc = None
 
         print("Control Task object instantiated")
 
     # --------- Helpers: decide which mode we're in ---------
     def _line_mode_enabled(self) -> bool:
         return (self._line_sensor is not None) and (self._other_effort_cmd is not None)
+
+    def _odo_reset(self):
+        """Reset odometry to zero at run start."""
+        self._odo_x    = 0.0
+        self._odo_y    = 0.0
+        self._odo_h    = 0.0
+        self._odo_dist = 0.0
+        self._enc_l_prev = self._enc.get_position()
+        if self._right_enc is not None:
+            self._enc_r_prev = self._right_enc.get_position()
+
+    def _odo_update(self):
+        """Update dead-reckoning position from encoder counts."""
+        import math
+        l_now = self._enc.get_position()
+        r_now = self._right_enc.get_position() if self._right_enc is not None else self._enc_r_prev
+
+        dl = (l_now - self._enc_l_prev) * self._MM_PER_COUNT
+        dr = -((r_now - self._enc_r_prev) * self._MM_PER_COUNT)  # negate: right motor is inverted
+        self._enc_l_prev = l_now
+        self._enc_r_prev = r_now
+
+        ds = (dl + dr) / 2.0          # forward displacement
+        dh = (dl - dr) / self._WHEEL_TRACK_MM   # heading change (rad)
+
+        self._odo_h += dh
+        self._odo_x += ds * math.cos(self._odo_h)
+        self._odo_y += ds * math.sin(self._odo_h)
+        self._odo_dist = math.sqrt(self._odo_x ** 2 + self._odo_y ** 2)
+
+    def get_odometry(self):
+        """Return (x_mm, y_mm, heading_deg, straight_line_dist_mm)."""
+        import math
+        return (self._odo_x, self._odo_y,
+                math.degrees(self._odo_h),
+                self._odo_dist)
 
     # ---------------- Speed-mode API ----------------
     def set_velocity_setpoint(self, vel_setpoint: float) -> None:
@@ -169,6 +234,18 @@ class task_control:
 
         return target
 
+    
+    # --------- Helpers: angle math ---------
+    @staticmethod
+    def _wrap_deg(angle_deg: float) -> float:
+        """Wrap angle to [-180, 180)."""
+        a = angle_deg
+        while a >= 180.0:
+            a -= 360.0
+        while a < -180.0:
+            a += 360.0
+        return a
+
     # ---------------- Line-mode API ----------------
     def set_base_effort(self, base_effort: float) -> None:
         self._base_effort_local = float(base_effort)
@@ -177,11 +254,26 @@ class task_control:
         self._kp_line = float(kp)
         self._kd_line = float(kd)
 
+    # IMU stabilization gains
+    def set_imu_gains(self, yawrate_gain: float = 0.0, heading_gain: float = 0.0) -> None:
+        """Set gains used in line-follow mode.
+        yawrate_gain: multiplies gyro Z (deg/s) as a damping term.
+        heading_gain: multiplies (heading - heading_ref) to reduce drift.
+        """
+        self._k_yawrate = float(yawrate_gain)
+        self._k_heading = float(heading_gain)
+
     def _get_base_effort(self) -> float:
         if self._base_effort_share is None:
             return self._base_effort_local
         val = self._base_effort_share.get()
         return self._base_effort_local if val is None else float(val)
+
+    def _get_right_trim(self) -> float:
+        if self._right_trim_share is None:
+            return 1.0
+        val = self._right_trim_share.get()
+        return 1.0 if val is None else float(val)
 
     # ---------------- Common stop ----------------
     def _log_pair_nonblocking(self, data_val, time_val):
@@ -239,16 +331,32 @@ class task_control:
 
                     # reset line controller memory
                     self._err_prev = 0.0
+                    self._err_int_line = 0.0
+
+                    # reset odometry to global zero
+                    self._odo_reset()
+
+                    # latch heading reference for heading-hold (optional)
+                    self._heading_ref = None
+                    if self._line_mode_enabled() and (self._imu_heading_share is not None):
+                        try:
+                            h0 = self._imu_heading_share.get()
+                            if h0 is not None:
+                                self._heading_ref = float(h0)
+                        except Exception:
+                            self._heading_ref = None
 
                     self._state = S2_RUN
 
             elif self._state == S2_RUN:
 
-                # If someone cleared the flag (UI 'q', etc.), stop immediately
-                if (not self._goFlag.get()) or (self._line_mode_enabled() and (self._other_goFlag is not None) and (not self._other_goFlag.get())):
+                # If someone cleared the left goFlag (UI cancel), stop both motors
+                if not self._goFlag.get():
                     self._effort_cmd.put(0.0)
                     if self._line_mode_enabled():
                         self._other_effort_cmd.put(0.0)
+                        if self._other_goFlag is not None:
+                            self._other_goFlag.put(False)
                     self._state = S1_WAIT
                     yield self._state
                     continue
@@ -270,15 +378,48 @@ class task_control:
                         continue
                     dt_s = dt_us / 1_000_000.0
 
+                    # Update both encoders so positions are fresh for odometry
+                    self._enc.update()
+                    if self._right_enc is not None:
+                        self._right_enc.update()
+
                     err = float(self._line_sensor.calculate_error())
                     derr = (err - self._err_prev) / dt_s
                     self._err_prev = err
 
+                    # Integrate error with anti-windup clamp
+                    self._err_int_line += err * dt_s
+                    self._err_int_line = max(-10.0, min(10.0, self._err_int_line))
+
                     base = self._get_base_effort()
-                    steer = (self._kp_line * err) + (self._kd_line * derr)
+                    steer = (self._kp_line * err) + (self._ki_line * self._err_int_line) + (self._kd_line * derr)
+
+                    # ---- IMU stabilization (optional) ----
+                    # Gyro Z damping (deg/s)
+                    if self._imu_yawrate_share is not None and self._k_yawrate != 0.0:
+                        try:
+                            wz = self._imu_yawrate_share.get()
+                            if wz is not None:
+                                # Subtract damping so positive yaw rate reduces further turning
+                                steer -= (self._k_yawrate * float(wz))
+                        except Exception:
+                            pass
+
+                    # Heading hold (degrees), referenced to heading at run start
+                    if self._imu_heading_share is not None and self._k_heading != 0.0 and (self._heading_ref is not None):
+                        try:
+                            h = self._imu_heading_share.get()
+                            if h is not None:
+                                h_err = self._wrap_deg(float(h) - float(self._heading_ref))
+                                steer -= (self._k_heading * h_err)
+                        except Exception:
+                            pass
 
                     left_out = base + steer
-                    right_out = base - steer
+                    # RIGHT_OFFSET: positive value = right motor spins faster.
+                    # task_motor inverts the command, so publishing a larger positive
+                    # value results in a larger magnitude after negation -> more PWM.
+                    right_out = (base - steer) + self._right_offset
 
                     # Coordinated scaling: if either wheel exceeds max_effort,
                     # scale BOTH down by the same factor so the differential
@@ -292,6 +433,9 @@ class task_control:
                     # Publish effort commands for BOTH wheels
                     self._effort_cmd.put(left_out)
                     self._other_effort_cmd.put(right_out)
+
+                    # Update dead-reckoning position
+                    self._odo_update()
 
                     # Optional logging: store error vs time (non-blocking)
                     self._log_pair_nonblocking(err, ticks_diff(now, self._startTime))
