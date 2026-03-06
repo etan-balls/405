@@ -96,8 +96,9 @@ class L_sensor:
             numerator += w * norm_value
             denominator += norm_value
 
-        # If we don't see the line (all sensors low), return 0 (straight)
-        if denominator < 0.01:
+        # If we don't see the line (all sensors near white), return 0 (straight).
+        # Threshold of 0.15 prevents all-white noise from producing a spurious centroid.
+        if denominator < 0.15:
             return 0.0
 
         error = numerator / denominator
