@@ -114,18 +114,15 @@ class task_control:
         self._pwm_deadband_hyst = 7.0
 
         # ---------------- Line-follow parameters ----------------
-        self._kp_line = 22.0
+        self._kp_line = 0.0
         self._ki_line = 0.0    # integral gain — set via ctrl_obj._ki_line in main.py
         self._base_effort_local = 35.0  # % PWM (0..100); tune for your robot
         self._err_int_line = 0.0   # line error integrator
-        self._turn_slowdown = 0.15  # reduce base by this fraction per unit of |err|
-                                    # 0 = disabled, 0.15 = 15% reduction at |err|=1
-                                    # effective base = base * max(0.3, 1 - k*|err|)
 
         # ---------------- Odometry ----------------
         # Dead-reckoning from encoder counts. Updated every control tick.
         # Reset to zero at the start of each run (when goFlag goes True).
-        self._WHEEL_TRACK_MM = 147.0   # mm between wheel contact patches (Romi)
+        self._WHEEL_TRACK_MM = 149.0   # mm between wheel contact patches (Romi)
         self._MM_PER_COUNT   = 0.15303 # (2*pi*35) / 1437.07
         self._odo_x   = 0.0   # mm, global X (forward from start)
         self._odo_y   = 0.0   # mm, global Y (left from start)
@@ -391,9 +388,6 @@ class task_control:
                     self._err_int_line = max(-10.0, min(10.0, self._err_int_line))
 
                     base = self._get_base_effort()
-                    if self._turn_slowdown > 0.0:
-                        speed_scale = max(0.3, 1.0 - self._turn_slowdown * abs(err))
-                        base *= speed_scale
                     steer = (self._kp_line * err) + (self._ki_line * self._err_int_line)
 
                     # ---- IMU stabilization (optional) ----
