@@ -13,15 +13,13 @@ S5_CAL     = micropython.const(5)   # calibration mode
 S6_MOT_L   = micropython.const(6)   # left motor test (2 s)
 S7_MOT_R   = micropython.const(7)   # right motor test (2 s)
 S8_STRAIGHT  = micropython.const(8)  # straight-line trim test (3 s)
-S9_IMU       = micropython.const(9)  # IMU live readout (until x)
 
 LF_DURATION_MS      = micropython.const(10_000)  # 10 seconds
 MOT_TEST_MS         = micropython.const(2_000)   # 2 seconds
 STRAIGHT_TEST_MS    = micropython.const(3_000)   # 3 seconds
-IMU_PRINT_MS        = micropython.const(100)     # IMU print interval (10 Hz)
 MOT_TEST_EFFORT     = micropython.const(30)      # PWM % for motor test
 CAL_PRINT_MS        = micropython.const(200)     # print interval during cal
-MM_PER_COUNT        = 0.15272                    # wheel radius 35mm, 1440 CPR
+MM_PER_COUNT        = 0.15303                    # wheel radius 35mm, 1437.07 CPR
 
 UI_prompt = ">: "
 N_SENSORS = 9
@@ -57,18 +55,6 @@ class _IO:
 
 
 class task_user:
-    """
-    UI task.
-      f          = start line follow (10 s auto-stop)
-      l          = spin LEFT motor only for 2 s (motor test)
-      r          = spin RIGHT motor only for 2 s (motor test)
-      x / any    = cancel / stop
-      c          = enter calibration mode
-        w        = capture white (average of current readings)
-        b        = capture black (max of current readings)
-        x        = exit calibration
-    """
-
     def __init__(self,
                  leftMotorGo: Share, rightMotorGo: Share,
                  lineFollowEnable: Share,
@@ -85,7 +71,11 @@ class task_user:
                  imu_yawrate: Share = None,      # BNO055 gyro Z (deg/s)
                  imu_calib: Share = None,        # packed calibration status byte
                  right_offset: float = 0.0,     # additive right-wheel trim for straight test
-                 ctrl=None):                    # control task object for odometry readout
+                 ctrl=None,                     # control task object for odometry readout
+                 s_hat_share: Share = None,      # state estimator arc-length (m)
+                 psi_hat_share: Share = None,   # state estimator heading (rad)
+                 omL_hat_share: Share = None,   # state estimator left wheel speed (rad/s)
+                 omR_hat_share: Share = None):  # state estimator right wheel speed (rad/s)
         self._state        = S0_INIT
         self._leftMotorGo  = leftMotorGo
         self._rightMotorGo = rightMotorGo
@@ -93,8 +83,12 @@ class task_user:
         self._arm          = armEnable
         self._sensor       = lineSensor
         self._line_err     = lineError
-        self._lf_start_ms  = 0
-        self._lf_print_ms  = 0      # throttle print rate during LF
+        self._lf_start_ms   = 0
+        self._lf_print_ms   = 0      # throttle print rate during LF
+        self._lf_enc_l0     = 0
+        self._lf_enc_r0     = 0
+        self._lf_s_hat0     = 0.0
+        self._lf_s_hat_init = False  # latch s_hat on first display tick
 
         # motor test effort shares (optional but recommended)
         self._leftEffortCmd  = leftEffortCmd
@@ -110,12 +104,17 @@ class task_user:
         self._imu_heading  = imu_heading
         self._imu_yawrate  = imu_yawrate
         self._imu_calib    = imu_calib
-        self._imu_start_ms = 0
-        self._imu_print_ms = 0
 
         # right wheel offset for straight test
         self._right_offset = float(right_offset)
         self._ctrl = ctrl
+
+        # state estimator shares (optional)
+        self._s_hat      = s_hat_share
+        self._psi_hat    = psi_hat_share
+        self._omL_hat    = omL_hat_share
+        self._omR_hat    = omR_hat_share
+        self._lf_psi_hat0 = 0.0
 
         # calibration state
         self._white_adc    = None
@@ -137,7 +136,6 @@ class task_user:
             self._rightEffortCmd.put(0.0)
 
     def _print_odometry(self):
-        """Print final position after a run."""
         if self._ctrl is None:
             return
         x, y, hdeg, dist = self._ctrl.get_odometry()
@@ -151,7 +149,18 @@ class task_user:
         self._leftMotorGo.put(True)
         self._rightMotorGo.put(True)
         self._lf_start_ms = ticks_ms()
+        # Zero encoders now so display distances always start at 0.
+        # The control task also zeros the left encoder on its next tick — that is fine.
+        if self._leftEncoder  is not None: self._leftEncoder.zero()
+        if self._rightEncoder is not None: self._rightEncoder.zero()
+        self._lf_enc_l0     = 0
+        self._lf_enc_r0     = 0
+        self._lf_s_hat0     = 0.0
+        self._lf_psi_hat0   = 0.0
+        self._lf_s_hat_init = False  # will latch on first display tick
+        self._lf_imu_psi0   = (self._imu_heading.get() or 0.0) if self._imu_heading is not None else 0.0
         self._io.write("LF ON (10 s)\r\n")
+        self._io.write("t_s,err,sL_meas,sR_meas,psi_imu,pdot_imu,sL_hat,sR_hat,psi_hat,pdot_hat,omL_hat,omR_hat\r\n")
         # Drain any trailing \r or \n left in the buffer from the command
         # that triggered this (e.g. step_tool sends 'f\r\n' so the \n
         # would immediately cancel the run on the next tick).
@@ -159,17 +168,35 @@ class task_user:
             self._io.read1()
         self._state = S4_LF
 
+    def _lf_print(self, t_s, err):
+        if self._leftEncoder  is not None: self._leftEncoder.update()
+        if self._rightEncoder is not None: self._rightEncoder.update()
+        l_pos = (self._leftEncoder.get_position()  - self._lf_enc_l0) if self._leftEncoder  is not None else 0
+        r_pos = (self._rightEncoder.get_position() - self._lf_enc_r0) if self._rightEncoder is not None else 0
+        sL_m = -l_pos * MM_PER_COUNT
+        sR_m = -r_pos * MM_PER_COUNT
+        psi_imu  = ((self._imu_heading.get() or 0.0) - self._lf_imu_psi0) * 0.017453 if self._imu_heading is not None else 0.0
+        pdot_imu = (self._imu_yawrate.get() or 0.0) * 0.017453 if self._imu_yawrate is not None else 0.0
+        s_hat_v   = (self._s_hat.get()   or 0.0) if self._s_hat   is not None else 0.0
+        psi_hat_v = (self._psi_hat.get() or 0.0) if self._psi_hat is not None else 0.0
+        omL_v     = (self._omL_hat.get() or 0.0) if self._omL_hat is not None else 0.0
+        omR_v     = (self._omR_hat.get() or 0.0) if self._omR_hat is not None else 0.0
+        if not self._lf_s_hat_init:
+            self._lf_s_hat0     = s_hat_v
+            self._lf_psi_hat0   = psi_hat_v
+            self._lf_s_hat_init = True
+        s_rel    = s_hat_v   - self._lf_s_hat0
+        psi_rel  = psi_hat_v - self._lf_psi_hat0
+        sL_hat_v = (s_rel - 0.0745 * psi_rel) * 1000.0
+        sR_hat_v = (s_rel + 0.0745 * psi_rel) * 1000.0
+        pdot_hat = (omR_v - omL_v) * 0.2349
+        self._io.write("{:.3f},{:+.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.3f},{:.3f}\r\n".format(
+            t_s, err, sL_m, sR_m, psi_imu, pdot_imu, sL_hat_v, sR_hat_v, psi_rel, pdot_hat, omL_v, omR_v))
+
     # ------------------------------------------------------------------
     # Motor test helpers
     # ------------------------------------------------------------------
     def _mot_test_begin(self, left: bool):
-        """Start a 2-second single-motor spin test.
-
-        Drives the motor hardware DIRECTLY (enable + set_effort) so the
-        control task cannot interfere.  Both go-flags are kept False so
-        task_control stays in S1_WAIT and task_motor stays in S1_WAIT —
-        neither will touch the hardware while we own it here.
-        """
         # Full disarm: keep ALL task flags False so no other task touches motors
         self._arm.put(False)
         self._lf_en.put(False)
@@ -205,26 +232,7 @@ class task_user:
         while self._io.any():
             self._io.read1()
 
-    def _imu_begin(self):
-        """Stream IMU heading, yaw rate, and calibration status until x is pressed."""
-        if self._imu_heading is None:
-            self._io.write("IMU shares not connected — pass imu_heading= to task_user\r\n" + UI_prompt)
-            return
-        self._imu_start_ms = ticks_ms()
-        self._imu_print_ms = ticks_ms() - IMU_PRINT_MS  # print immediately on first tick
-        self._io.write("\r\n--- IMU READOUT (press x to stop) ---\r\n")
-        self._io.write("time(s)   heading(deg)  yaw_rate(dps)  calib(sys/gyr/acc/mag)\r\n")
-        while self._io.any():
-            self._io.read1()
-        self._state = S9_IMU
-
     def _straight_begin(self):
-        """Run both motors for 3 s with no steering so you can tune RIGHT_OFFSET.
-
-        Left  motor gets -MOT_TEST_EFFORT.
-        Right motor gets -(MOT_TEST_EFFORT + right_offset) matching what the
-        control task does, so what you see here is what you get during line follow.
-        """
         self._arm.put(False)
         self._lf_en.put(False)
         self._leftMotorGo.put(False)
@@ -289,7 +297,6 @@ class task_user:
         self._state = S5_CAL
 
     def _cal_print_live(self, readings):
-        """Print ADC readings and current error on one line."""
         # compute error using current cal values (or raw if not calibrated)
         white = self._white_adc if self._white_adc is not None else min(readings)
         black = self._black_adc if self._black_adc is not None else max(readings)
@@ -324,49 +331,15 @@ class task_user:
         self._cal_try_recommend()
 
     def _cal_try_recommend(self):
-        """If both white and black are captured, print recommended K values."""
         if self._white_adc is None or self._black_adc is None:
             return
         w = self._white_adc
         b = self._black_adc
-        scale = b - w
-        contrast = abs(scale) / 4095.0 * 100.0
-        self._io.write("\r\n=== CALIBRATION RESULTS ===\r\n")
-        self._io.write("white_adc = {}\r\n".format(w))
-        self._io.write("black_adc = {}\r\n".format(b))
-        self._io.write("contrast  = {:.1f}%  ".format(contrast))
-        if contrast > 40:
-            self._io.write("(excellent)\r\n")
-        elif contrast > 20:
-            self._io.write("(good)\r\n")
-        elif contrast > 10:
-            self._io.write("(marginal - consider recalibrating)\r\n")
-        else:
-            self._io.write("(TOO LOW - recalibrate on better surface)\r\n")
-
-        self._io.write("\r\n--- Recommended STEER_GAIN values ---\r\n")
-        self._io.write("(based on max error = 5.0, adjust BASE_VEL column for your speed)\r\n")
-        self._io.write("{:<12} {:<14} {}\r\n".format("STEER_GAIN", "Δvel @BASE400", "Behaviour"))
-        self._io.write("{}\r\n".format("-" * 44))
-        gains = [
-            (0.02, "conservative"),
-            (0.04, "conservative"),
-            (0.08, "moderate    "),
-            (0.12, "moderate    "),
-            (0.18, "aggressive  "),
-            (0.25, "aggressive  "),
-        ]
-        for k, label in gains:
-            delta = k * 5.0 * 400
-            pct   = delta / 400 * 100
-            rec   = " <-- recommended" if 30 <= pct <= 60 else ""
-            self._io.write("{:<12} {:<14} {}{}\r\n".format(
-                str(k), "+/-{:.0f} ({:.0f}%)".format(delta, pct), label, rec))
-
-        self._io.write("\r\nCopy into main.py:\r\n")
-        self._io.write("  black_adc  = {}\r\n".format(b))
-        self._io.write("  white_adc  = {}\r\n".format(w))
-        self._io.write("\r\nPress x to exit calibration.\r\n")
+        contrast = abs(b - w) / 4095.0 * 100.0
+        self._io.write("\r\n=== CAL RESULTS ===\r\n")
+        self._io.write("white_adc={} black_adc={} contrast={:.1f}%\r\n".format(w, b, contrast))
+        self._io.write("Copy into main.py: black_adc={} white_adc={}\r\n".format(b, w))
+        self._io.write("Press x to exit.\r\n")
 
     # ------------------------------------------------------------------
     # Main generator
@@ -377,7 +350,7 @@ class task_user:
             # ---- S0: init ----
             if self._state == S0_INIT:
                 self._disarm()
-                self._io.write("\r\nREADY  f=line  l=left  r=right  s=straight  i=imu  c=cal\r\n" + UI_prompt)
+                self._io.write("\r\nREADY  f=line  l=left  r=right  s=straight  c=cal\r\n" + UI_prompt)
                 self._state = S1_CMD
 
             # ---- S1: waiting for keypress ----
@@ -398,13 +371,11 @@ class task_user:
                             self._mot_test_begin(left=False)
                         elif ch in {"s", "S"}:
                             self._straight_begin()
-                        elif ch in {"i", "I"}:
-                            self._imu_begin()
                         elif ch in {"c", "C"}:
                             self._cal_enter()
                         else:
                             self._disarm()
-                            self._io.write("\r\nSTOPPED  f=line  l=left  r=right  s=straight  i=imu  c=cal\r\n" + UI_prompt)
+                            self._io.write("\r\nSTOPPED  f=line  l=left  r=right  s=straight  c=cal\r\n" + UI_prompt)
 
                         yield self._state
                         continue
@@ -428,19 +399,7 @@ class task_user:
                     t_s = elapsed / 1000.0
                     err = self._line_err.get() if self._line_err is not None else 0.0
 
-                    # read encoder positions (update for fresh reading)
-                    if self._leftEncoder is not None:
-                        self._leftEncoder.update()
-                    if self._rightEncoder is not None:
-                        self._rightEncoder.update()
-                    l_pos = self._leftEncoder.get_position()  if self._leftEncoder  is not None else 0
-                    r_pos = self._rightEncoder.get_position() if self._rightEncoder is not None else 0
-                    r_pos = self._rightEncoder.get_position() if self._rightEncoder is not None else 0
-                    l_mm = l_pos * MM_PER_COUNT
-                    r_mm = -r_pos * MM_PER_COUNT  # negate: right encoder counts negative going forward
-
-                    self._io.write("LF,{:.3f},err={:+.4f},Lmm={:.1f},Rmm={:.1f}\r\n".format(
-                        t_s, err, l_mm, r_mm))
+                    self._lf_print(t_s, err)
 
                 if elapsed >= LF_DURATION_MS:
                     self._disarm()
@@ -456,17 +415,23 @@ class task_user:
                     yield self._state
                     continue
 
-                # Print left encoder position at ~100 ms intervals
-                if self._leftEncoder is not None:
-                    now_ms = ticks_ms()
-                    if ticks_diff(now_ms, self._mot_print_ms) >= 100:
-                        self._mot_print_ms = now_ms
+                # Print both encoder positions at ~100 ms intervals
+                now_ms = ticks_ms()
+                if ticks_diff(now_ms, self._mot_print_ms) >= 100:
+                    self._mot_print_ms = now_ms
+                    elapsed = ticks_diff(now_ms, self._mot_start_ms)
+                    if self._leftEncoder is not None:
                         self._leftEncoder.update()
-                        elapsed = ticks_diff(now_ms, self._mot_start_ms)
-                        self._io.write("L pos={} vel={:.0f} t={:.2f}s\r\n".format(
-                            self._leftEncoder.get_position(),
-                            self._leftEncoder.get_velocity(),
-                            elapsed / 1000.0))
+                    if self._rightEncoder is not None:
+                        self._rightEncoder.update()
+                    l_pos = self._leftEncoder.get_position()  if self._leftEncoder  is not None else 0
+                    r_pos = self._rightEncoder.get_position() if self._rightEncoder is not None else 0
+                    l_vel = self._leftEncoder.get_velocity()  if self._leftEncoder  is not None else 0
+                    r_vel = self._rightEncoder.get_velocity() if self._rightEncoder is not None else 0
+                    l_raw = self._leftEncoder.tim_pin.counter()  if self._leftEncoder  is not None else 0
+                    r_raw = self._rightEncoder.tim_pin.counter() if self._rightEncoder is not None else 0
+                    self._io.write("L=({},{:.0f},{}) R=({},{:.0f},{}) t={:.2f}s\r\n".format(
+                        l_pos, l_vel, l_raw, r_pos, r_vel, r_raw, elapsed / 1000.0))
 
                 if ticks_diff(ticks_ms(), self._mot_start_ms) >= MOT_TEST_MS:
                     self._mot_test_done("LEFT motor")
@@ -479,17 +444,23 @@ class task_user:
                     yield self._state
                     continue
 
-                # Print right encoder position at ~100 ms intervals
-                if self._rightEncoder is not None:
-                    now_ms = ticks_ms()
-                    if ticks_diff(now_ms, self._mot_print_ms) >= 100:
-                        self._mot_print_ms = now_ms
+                # Print both encoder positions at ~100 ms intervals
+                now_ms = ticks_ms()
+                if ticks_diff(now_ms, self._mot_print_ms) >= 100:
+                    self._mot_print_ms = now_ms
+                    elapsed = ticks_diff(now_ms, self._mot_start_ms)
+                    if self._leftEncoder is not None:
+                        self._leftEncoder.update()
+                    if self._rightEncoder is not None:
                         self._rightEncoder.update()
-                        elapsed = ticks_diff(now_ms, self._mot_start_ms)
-                        self._io.write("R pos={} vel={:.0f} t={:.2f}s\r\n".format(
-                            self._rightEncoder.get_position(),
-                            self._rightEncoder.get_velocity(),
-                            elapsed / 1000.0))
+                    l_pos = self._leftEncoder.get_position()  if self._leftEncoder  is not None else 0
+                    r_pos = self._rightEncoder.get_position() if self._rightEncoder is not None else 0
+                    l_vel = self._leftEncoder.get_velocity()  if self._leftEncoder  is not None else 0
+                    r_vel = self._rightEncoder.get_velocity() if self._rightEncoder is not None else 0
+                    l_raw = self._leftEncoder.tim_pin.counter()  if self._leftEncoder  is not None else 0
+                    r_raw = self._rightEncoder.tim_pin.counter() if self._rightEncoder is not None else 0
+                    self._io.write("L=({},{:.0f},{}) R=({},{:.0f},{}) t={:.2f}s\r\n".format(
+                        l_pos, l_vel, l_raw, r_pos, r_vel, r_raw, elapsed / 1000.0))
 
                 if ticks_diff(ticks_ms(), self._mot_start_ms) >= MOT_TEST_MS:
                     self._mot_test_done("RIGHT motor")
@@ -514,29 +485,6 @@ class task_user:
 
                 if ticks_diff(ticks_ms(), self._mot_start_ms) >= STRAIGHT_TEST_MS:
                     self._mot_test_done("STRAIGHT")
-
-            # ---- S9: IMU live readout ----
-            elif self._state == S9_IMU:
-                if self._io.any():
-                    self._io.read1()
-                    self._io.write("\r\nIMU readout stopped.\r\n" + UI_prompt)
-                    self._state = S1_CMD
-                    yield self._state
-                    continue
-
-                now_ms = ticks_ms()
-                if ticks_diff(now_ms, self._imu_print_ms) >= IMU_PRINT_MS:
-                    self._imu_print_ms = now_ms
-                    t_s = ticks_diff(now_ms, self._imu_start_ms) / 1000.0
-                    heading  = self._imu_heading.get()  if self._imu_heading  is not None else 0.0
-                    yawrate  = self._imu_yawrate.get()  if self._imu_yawrate  is not None else 0.0
-                    cal_byte = self._imu_calib.get()    if self._imu_calib    is not None else 0
-                    sys_cal = (cal_byte >> 6) & 0x03
-                    gyr_cal = (cal_byte >> 4) & 0x03
-                    acc_cal = (cal_byte >> 2) & 0x03
-                    mag_cal = (cal_byte >> 0) & 0x03
-                    self._io.write("{:7.2f}   {:+8.2f}      {:+8.2f}       {}/{}/{}/{}\r\n".format(
-                        t_s, heading, yawrate, sys_cal, gyr_cal, acc_cal, mag_cal))
 
             # ---- S5: calibration mode ----
             elif self._state == S5_CAL:

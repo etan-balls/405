@@ -21,6 +21,8 @@ from task_user import task_user
 collect()
 from task_imu import task_imu
 collect()
+from task_state_estimator import task_state_estimator
+collect()
 from task_share import Share
 from cotask import Task, task_list
 collect()
@@ -30,7 +32,7 @@ print("RAM free after imports:", mem_free())
 # -----------------
 # Bluetooth UART1 setup (HC-05 on PB6=TX, PB7=RX)
 # -----------------
-bt = UART(1, baudrate=9600, timeout=10)
+bt = UART(1, baudrate=9600, timeout=10)  # change to 115200 if bt_config.py was run
 
 # Redirect the MicroPython REPL (and therefore all print/input) to UART3.
 # PuTTY connects to the HC-05 COM port at 115200 to see all output.
@@ -44,8 +46,8 @@ tim3 = Timer(3, freq=20000)
 leftMotor  = motor_driver(Pin.cpu.B5,  Pin.cpu.B4,  Pin.cpu.C8, tim3, 3)
 rightMotor = motor_driver(Pin.cpu.B15, Pin.cpu.B14, Pin.cpu.C9, tim3, 4)
 
-leftEncoder  = encoder(2, pyb.Pin.cpu.A0, pyb.Pin.cpu.A1)
-rightEncoder = encoder(1, pyb.Pin.cpu.A8, pyb.Pin.cpu.A9)
+leftEncoder  = encoder(1, pyb.Pin.cpu.A8, pyb.Pin.cpu.A9)
+rightEncoder = encoder(2, pyb.Pin.cpu.A0, pyb.Pin.cpu.A1)
 
 pins = [
     Pin.cpu.C0, Pin.cpu.C1, Pin.cpu.C2, Pin.cpu.C3, Pin.cpu.C4,
@@ -67,8 +69,8 @@ i2c = pyb.I2C(1, pyb.I2C.CONTROLLER, baudrate=400000)
 # Tuning parameters — edit these before flashing
 # -----------------
 BASE_EFFORT = 20.0   # raised — right motor needs >20% to overcome friction          20
-STEER_GAIN  = 0.4    # recommended starting point from calibration mode             .4
-KI_LINE     = 0.0    # integral gain on line error
+KP_LINE     = 3.0    # proportional gain on line error (raw value, no hidden scaling)
+KI_LINE     = .10    # integral gain on line error
                      # start at 0, raise slowly (e.g. 0.001) if robot drifts on long straights
 MAX_EFFORT  = 90.0   # hard ceiling on any single wheel PWM %
                      # must be > BASE_EFFORT or steering has no headroom
@@ -78,7 +80,7 @@ RIGHT_OFFSET = 2.0   # additive PWM % added to right wheel to correct straight-l
                      # tune with 's' key until encoder diff stays near 0
 
 # IMU stabilization gains (set to 0.0 to disable each term)
-YAW_RATE_GAIN = 0.0   # damps oscillation using gyro Z (deg/s) — increase if robot wiggles
+YAW_RATE_GAIN = .00   # damps oscillation using gyro Z (deg/s) — increase if robot wiggles
 HEADING_GAIN  = 0.0   # corrects heading drift using absolute Euler heading (deg)
 
 
@@ -95,12 +97,17 @@ rightEffortCmd = Share('f', thread_protect=False, name="RM_eff")
 lineError        = Share('f', thread_protect=False, name="line_err")
 lineFollowEnable = Share('b', thread_protect=False, name="lf_en")
 baseEffort       = Share('f', thread_protect=False, name="base_effort")
-steerGain        = Share('f', thread_protect=False, name="steer_gain")
 
 # IMU shares — written by task_imu, read by task_control
 imu_heading_deg  = Share('f', thread_protect=False, name="imu_head")
 imu_yaw_rate_dps = Share('f', thread_protect=False, name="imu_wz")
 imu_calib        = Share('b', thread_protect=False, name="imu_cal")
+
+# State estimator output shares
+psi_hat  = Share('f', thread_protect=False, name='psi_hat')
+s_hat    = Share('f', thread_protect=False, name='s_hat')
+omL_hat  = Share('f', thread_protect=False, name='omL_hat')
+omR_hat  = Share('f', thread_protect=False, name='omR_hat')
 
 # Initial values
 leftMotorGo.put(False)
@@ -110,7 +117,6 @@ leftEffortCmd.put(0.0)
 rightEffortCmd.put(0.0)
 lineFollowEnable.put(False)
 baseEffort.put(BASE_EFFORT)
-steerGain.put(STEER_GAIN)
 imu_heading_deg.put(0.0)
 imu_yaw_rate_dps.put(0.0)
 imu_calib.put(0)
@@ -142,13 +148,19 @@ ctrl_obj = task_control(
     imu_heading_share=imu_heading_deg,
     imu_yawrate_share=imu_yaw_rate_dps,
 )
-ctrl_obj._kp_line    = STEER_GAIN * 10
+ctrl_obj._kp_line    = KP_LINE
 ctrl_obj._ki_line    = KI_LINE
-ctrl_obj._kd_line    = 0.0
 ctrl_obj._max_effort = MAX_EFFORT
 ctrl_obj._right_offset = RIGHT_OFFSET   # additive right-wheel trim
 ctrl_obj._right_enc    = rightEncoder   # needed for odometry
 ctrl_obj.set_imu_gains(yawrate_gain=YAW_RATE_GAIN, heading_gain=HEADING_GAIN)
+
+est_obj = task_state_estimator(
+    leftEncoder, rightEncoder,
+    imu_heading_deg, imu_yaw_rate_dps,
+    leftEffortCmd, rightEffortCmd,
+    psi_hat, s_hat, omL_hat, omR_hat,
+)
 
 motL_obj = task_motor(leftMotor,  leftMotorGo,  leftEffortCmd,  armEnable, invert=True)
 motR_obj = task_motor(rightMotor, rightMotorGo, rightEffortCmd, armEnable, invert=True)
@@ -173,6 +185,10 @@ user_obj = task_user(
     imu_calib=imu_calib,
     right_offset=RIGHT_OFFSET,
     ctrl=ctrl_obj,
+    s_hat_share=s_hat,
+    psi_hat_share=psi_hat,
+    omL_hat_share=omL_hat,
+    omR_hat_share=omR_hat,
 )
 
 
@@ -180,10 +196,11 @@ user_obj = task_user(
 # Scheduler — ctrlR removed, ctrl_obj drives both wheels
 # -----------------
 task_list.append(Task(sensor_obj.run,   name="Sensor", priority=5, period=20))
-task_list.append(Task(imu_task_obj.run, name="IMU",    priority=5, period=20))
+task_list.append(Task(imu_task_obj.run, name="IMU",    priority=5, period=20))  # designed for Ts=20ms
 task_list.append(Task(ctrl_obj.run,     name="Ctrl",   priority=4, period=20))
 task_list.append(Task(motL_obj.run,     name="MotL",   priority=3, period=20))
 task_list.append(Task(motR_obj.run,     name="MotR",   priority=3, period=20))
+task_list.append(Task(est_obj.run,      name="Est",    priority=2, period=20))  # matrices designed for Ts=20ms
 task_list.append(Task(user_obj.run,     name="User",   priority=1, period=50))
 
 collect()

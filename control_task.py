@@ -114,18 +114,16 @@ class task_control:
         self._pwm_deadband_hyst = 7.0
 
         # ---------------- Line-follow parameters ----------------
-        self._kp_line = 22.0
+        self._kp_line = 0.0
         self._ki_line = 0.0    # integral gain — set via ctrl_obj._ki_line in main.py
-        self._kd_line = 2.0
         self._base_effort_local = 35.0  # % PWM (0..100); tune for your robot
-        self._err_prev = 0.0
         self._err_int_line = 0.0   # line error integrator
 
         # ---------------- Odometry ----------------
         # Dead-reckoning from encoder counts. Updated every control tick.
         # Reset to zero at the start of each run (when goFlag goes True).
-        self._WHEEL_TRACK_MM = 147.0   # mm between wheel contact patches (Romi)
-        self._MM_PER_COUNT   = 0.15272 # (2*pi*35) / 1440
+        self._WHEEL_TRACK_MM = 149.0   # mm between wheel contact patches (Romi)
+        self._MM_PER_COUNT   = 0.15303 # (2*pi*35) / 1437.07
         self._odo_x   = 0.0   # mm, global X (forward from start)
         self._odo_y   = 0.0   # mm, global Y (left from start)
         self._odo_h   = 0.0   # radians, heading (0 = straight ahead)
@@ -157,8 +155,9 @@ class task_control:
         l_now = self._enc.get_position()
         r_now = self._right_enc.get_position() if self._right_enc is not None else self._enc_r_prev
 
-        dl = (l_now - self._enc_l_prev) * self._MM_PER_COUNT
-        dr = -((r_now - self._enc_r_prev) * self._MM_PER_COUNT)  # negate: right motor is inverted
+        # Both encoders count negative going forward; negate both so dl, dr > 0 fwd.
+        dl = -((l_now - self._enc_l_prev) * self._MM_PER_COUNT)
+        dr = -((r_now - self._enc_r_prev) * self._MM_PER_COUNT)
         self._enc_l_prev = l_now
         self._enc_r_prev = r_now
 
@@ -250,9 +249,8 @@ class task_control:
     def set_base_effort(self, base_effort: float) -> None:
         self._base_effort_local = float(base_effort)
 
-    def set_line_gains(self, kp: float, kd: float = 0.0) -> None:
+    def set_line_gains(self, kp: float) -> None:
         self._kp_line = float(kp)
-        self._kd_line = float(kd)
 
     # IMU stabilization gains
     def set_imu_gains(self, yawrate_gain: float = 0.0, heading_gain: float = 0.0) -> None:
@@ -330,7 +328,7 @@ class task_control:
                     self._vel_filt = 0.0
 
                     # reset line controller memory
-                    self._err_prev = 0.0
+
                     self._err_int_line = 0.0
 
                     # reset odometry to global zero
@@ -384,15 +382,13 @@ class task_control:
                         self._right_enc.update()
 
                     err = float(self._line_sensor.calculate_error())
-                    derr = (err - self._err_prev) / dt_s
-                    self._err_prev = err
 
                     # Integrate error with anti-windup clamp
                     self._err_int_line += err * dt_s
                     self._err_int_line = max(-10.0, min(10.0, self._err_int_line))
 
                     base = self._get_base_effort()
-                    steer = (self._kp_line * err) + (self._ki_line * self._err_int_line) + (self._kd_line * derr)
+                    steer = (self._kp_line * err) + (self._ki_line * self._err_int_line)
 
                     # ---- IMU stabilization (optional) ----
                     # Gyro Z damping (deg/s)

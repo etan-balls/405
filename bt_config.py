@@ -3,8 +3,8 @@
 # 2) Disconnect the USB cable from your computer but
 #    leave it plugged into the Shoe of Brian.
 # 3) Connect the HC-05 Bluetooth module to the Nucleo:
-#    BT TX  -> PC11  (CN7-2, USART3_RX)
-#    BT RX  <- PC10  (CN7-1, USART3_TX)
+#    BT TX  -> PB7   (UART1_RX)
+#    BT RX  <- PB6   (UART1_TX)
 #    BT VCC <- Nucleo 3.3V or 5V
 #    BT GND <- Nucleo GND
 # 4) While holding down the enable button on the
@@ -47,9 +47,9 @@ if stopbit not in al_stopbit:
 if parity not in al_parity:
     raise ValueError(f"Invalid Parity Selected; choose from {al_parity}")
 
-# UART3 uses PC10 (TX) and PC11 (RX)
+# UART1 uses PB6 (TX) and PB7 (RX)
 # HC-05 AT command mode runs at 38400 baud regardless of configured baudrate
-ser = UART(3, 38400, timeout=1000)
+ser = UART(1, 38400, timeout=1000)
 
 user_in = input("Enter 'R' to factory reset or 'C' to configure the Bluetooth Module\r\nCMD: ")
 

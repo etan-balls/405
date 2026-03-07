@@ -40,8 +40,9 @@ class BNO055:
     _GYR_Z_LSB = 0x18
 
     # Modes
-    _MODE_CONFIG = 0x00
-    _MODE_NDOF = 0x0C
+    _MODE_CONFIG   = 0x00
+    _MODE_IMUPLUS  = 0x08   # accel + gyro only — stable near motors
+    _MODE_NDOF     = 0x0C   # accel + gyro + mag — affected by motor fields
 
     # Power modes
     _PWR_NORMAL = 0x00
@@ -109,7 +110,7 @@ class BNO055:
             self._w8(self._SYS_TRIGGER, 0x80)
             time.sleep_ms(10)
 
-        self.set_mode(self._MODE_NDOF)
+        self.set_mode(self._MODE_IMUPLUS)
         time.sleep_ms(25)
         return True
 
