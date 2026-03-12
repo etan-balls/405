@@ -18,8 +18,12 @@ class L_sensor:
         Initialize line follower with calibration values and steering bias.
 
         :param multi_sensor_read_object: IR sensor array object with a .read() -> list[int]
-        :param black: ADC value for black surface (line)
-        :param white: ADC value for white surface (background)
+        :param black: ADC value for black surface (line). May be a single
+                      scalar for all sensors or a list/tuple of per-sensor
+                      values.
+        :param white: ADC value for white surface (background). May be a single
+                      scalar for all sensors or a list/tuple of per-sensor
+                      values.
         :param bias: Steering bias (positive=right, negative=left)
         :param weights: Optional list of weights (same length as sensor readings). If None,
                         symmetric weights are generated automatically from sensor_count.
@@ -27,6 +31,7 @@ class L_sensor:
                              take one read() during init to infer the count.
         """
         self.ir = multi_sensor_read_object
+        # Allow scalar or per-sensor lists for black/white calibration.
         self.black = black
         self.white = white
         self.bias = bias
@@ -79,16 +84,34 @@ class L_sensor:
 
         self._ensure_weight_length(n)
 
-        denom_scale = (self.black - self.white)
-        if denom_scale == 0:
-            # Avoid divide-by-zero if calibration values are identical
-            return 0.0
-
         numerator = 0.0
         denominator = 0.0
 
-        for w, reading in zip(self.weights, readings):
-            norm_value = (reading - self.white) / denom_scale
+        # Decide if black/white are scalars or per-sensor sequences.
+        # Use isinstance(list/tuple) instead of __len__ so this also works
+        # under MicroPython where __len__ may not be exposed as an attribute.
+        is_seq = isinstance(self.black, (list, tuple)) and isinstance(
+            self.white, (list, tuple)
+        )
+
+        for idx, (w, reading) in enumerate(zip(self.weights, readings)):
+            if is_seq:
+                try:
+                    b_i = float(self.black[idx])
+                    w_i = float(self.white[idx])
+                except (IndexError, TypeError, ValueError):
+                    # Fallback: skip this sensor if calibration is malformed
+                    continue
+            else:
+                b_i = float(self.black)
+                w_i = float(self.white)
+
+            denom_scale = (b_i - w_i)
+            if denom_scale == 0:
+                # Skip this sensor if calibration values are identical
+                continue
+
+            norm_value = (reading - w_i) / denom_scale
             if norm_value < 0.0:
                 norm_value = 0.0
             elif norm_value > 1.0:

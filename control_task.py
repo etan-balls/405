@@ -176,6 +176,19 @@ class task_control:
                 math.degrees(self._odo_h),
                 self._odo_dist)
 
+    def set_odometry(self, x_mm: float, y_mm: float, heading_deg: float) -> None:
+        """
+        Force odometry to a known pose.
+
+        Useful when the robot hits a known landmark (e.g. wall at a known X)
+        so accumulated drift can be reset.
+        """
+        import math
+        self._odo_x = float(x_mm)
+        self._odo_y = float(y_mm)
+        self._odo_h = math.radians(float(heading_deg))
+        self._odo_dist = math.sqrt(self._odo_x ** 2 + self._odo_y ** 2)
+
     # ---------------- Speed-mode API ----------------
     def set_velocity_setpoint(self, vel_setpoint: float) -> None:
         self._vel_setpoint_local = float(vel_setpoint)

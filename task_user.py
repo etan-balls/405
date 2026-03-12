@@ -3,16 +3,19 @@
 import sys
 import uselect
 import micropython
-from utime import ticks_ms, ticks_diff
+from utime import ticks_ms, ticks_diff, sleep_ms
 from task_share import Share
+from bump_sensor import BumpSensors
 
 S0_INIT    = micropython.const(0)
 S1_CMD     = micropython.const(1)
-S4_LF      = micropython.const(4)
-S5_CAL     = micropython.const(5)   # calibration mode
-S6_MOT_L   = micropython.const(6)   # left motor test (2 s)
-S7_MOT_R   = micropython.const(7)   # right motor test (2 s)
-S8_STRAIGHT  = micropython.const(8)  # straight-line trim test (3 s)
+S4_LF        = micropython.const(4)
+S5_CAL       = micropython.const(5)   # calibration mode
+S6_MOT_L     = micropython.const(6)   # left motor test (2 s)
+S7_MOT_R     = micropython.const(7)   # right motor test (2 s)
+S8_STRAIGHT  = micropython.const(8)   # straight-line trim test (3 s)
+S9_OBS_LF    = micropython.const(9)   # obstacle-course line follow using bump sensors
+S10_BUMPTEST = micropython.const(10)  # bumper sensor test mode
 
 LF_DURATION_MS      = micropython.const(10_000)  # 10 seconds
 MOT_TEST_MS         = micropython.const(2_000)   # 2 seconds
@@ -70,12 +73,13 @@ class task_user:
                  imu_heading: Share = None,      # BNO055 Euler heading (deg)
                  imu_yawrate: Share = None,      # BNO055 gyro Z (deg/s)
                  imu_calib: Share = None,        # packed calibration status byte
-                 right_offset: float = 0.0,     # additive right-wheel trim for straight test
-                 ctrl=None,                     # control task object for odometry readout
+                 right_offset: float = 0.0,      # additive right-wheel trim for straight test
+                 ctrl=None,                      # control task object for odometry readout
                  s_hat_share: Share = None,      # state estimator arc-length (m)
-                 psi_hat_share: Share = None,   # state estimator heading (rad)
-                 omL_hat_share: Share = None,   # state estimator left wheel speed (rad/s)
-                 omR_hat_share: Share = None):  # state estimator right wheel speed (rad/s)
+                 psi_hat_share: Share = None,    # state estimator heading (rad)
+                 omL_hat_share: Share = None,    # state estimator left wheel speed (rad/s)
+                 omR_hat_share: Share = None,    # state estimator right wheel speed (rad/s)
+                 bump_sensors: BumpSensors = None):  # bumper boards (optional)
         self._state        = S0_INIT
         self._leftMotorGo  = leftMotorGo
         self._rightMotorGo = rightMotorGo
@@ -115,6 +119,12 @@ class task_user:
         self._omL_hat    = omL_hat_share
         self._omR_hat    = omR_hat_share
         self._lf_psi_hat0 = 0.0
+
+        # bumper sensors (optional)
+        self._bump = bump_sensors
+        # known wall pose (forward along +X from start)
+        self._wall_x_mm = 962.5
+        self._wall_y_mm = 0.0
 
         # calibration state
         self._white_adc    = None
@@ -160,13 +170,27 @@ class task_user:
         self._lf_s_hat_init = False  # will latch on first display tick
         self._lf_imu_psi0   = (self._imu_heading.get() or 0.0) if self._imu_heading is not None else 0.0
         self._io.write("LF ON (10 s)\r\n")
-        self._io.write("t_s,err,sL_meas,sR_meas,psi_imu,pdot_imu,sL_hat,sR_hat,psi_hat,pdot_hat,omL_hat,omR_hat\r\n")
+        # Column order: error first so logs begin with line error
+        self._io.write("err,t_s,sL_meas,sR_meas,psi_imu,pdot_imu,sL_hat,sR_hat,psi_hat,pdot_hat,omL_hat,omR_hat\r\n")
         # Drain any trailing \r or \n left in the buffer from the command
         # that triggered this (e.g. step_tool sends 'f\r\n' so the \n
         # would immediately cancel the run on the next tick).
         while self._io.any():
             self._io.read1()
         self._state = S4_LF
+
+    def _obs_begin(self):
+        """
+        Begin obstacle-course run.
+
+        Currently implemented as a line-follow segment which runs until a bumper
+        is pressed (or cancelled from the terminal). This reuses the same
+        encoder/IMU zeroing as _lf_begin() but switches to S9_OBS_LF so we can
+        add more obstacle-course phases later.
+        """
+        self._lf_begin()
+        self._io.write("OBSTACLE COURSE: line follow until bump hit  (o to start)\r\n")
+        self._state = S9_OBS_LF
 
     def _lf_print(self, t_s, err):
         if self._leftEncoder  is not None: self._leftEncoder.update()
@@ -190,8 +214,9 @@ class task_user:
         sL_hat_v = (s_rel - 0.0745 * psi_rel) * 1000.0
         sR_hat_v = (s_rel + 0.0745 * psi_rel) * 1000.0
         pdot_hat = (omR_v - omL_v) * 0.2349
-        self._io.write("{:.3f},{:+.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.3f},{:.3f}\r\n".format(
-            t_s, err, sL_m, sR_m, psi_imu, pdot_imu, sL_hat_v, sR_hat_v, psi_rel, pdot_hat, omL_v, omR_v))
+        # err in first column, time second
+        self._io.write("{:+.4f},{:.3f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.3f},{:.3f}\r\n".format(
+            err, t_s, sL_m, sR_m, psi_imu, pdot_imu, sL_hat_v, sR_hat_v, psi_rel, pdot_hat, omL_v, omR_v))
 
     # ------------------------------------------------------------------
     # Motor test helpers
@@ -350,7 +375,10 @@ class task_user:
             # ---- S0: init ----
             if self._state == S0_INIT:
                 self._disarm()
-                self._io.write("\r\nREADY  f=line  l=left  r=right  s=straight  c=cal\r\n" + UI_prompt)
+                self._io.write(
+                    "\r\nREADY  f=line  l=left  r=right  s=straight  o=obstacle  p=bump-test  c=cal\r\n"
+                    + UI_prompt
+                )
                 self._state = S1_CMD
 
             # ---- S1: waiting for keypress ----
@@ -373,9 +401,19 @@ class task_user:
                             self._straight_begin()
                         elif ch in {"c", "C"}:
                             self._cal_enter()
+                        elif ch in {"o", "O"}:
+                            self._obs_begin()
+                        elif ch in {"p", "P"}:
+                            # Simple interactive bumper test; motors stay disarmed
+                            self._disarm()
+                            self._io.write("\r\nBUMP TEST MODE  (press x to exit)\r\n")
+                            self._state = S10_BUMPTEST
                         else:
                             self._disarm()
-                            self._io.write("\r\nSTOPPED  f=line  l=left  r=right  s=straight  c=cal\r\n" + UI_prompt)
+                            self._io.write(
+                                "\r\nSTOPPED  f=line  l=left  r=right  s=straight  o=obstacle  p=bump-test  c=cal\r\n"
+                                + UI_prompt
+                            )
 
                         yield self._state
                         continue
@@ -387,7 +425,7 @@ class task_user:
                     self._io.read1()   # consume key
                     self._disarm()
                     self._print_odometry()
-                    self._io.write("\r\nLF CANCELLED  f=line  c=cal\r\n" + UI_prompt)
+                    self._io.write("\r\nLF CANCELLED  f=line  o=obstacle  p=bump-test  c=cal\r\n" + UI_prompt)
                     self._state = S1_CMD
                     yield self._state
                     continue
@@ -404,8 +442,51 @@ class task_user:
                 if elapsed >= LF_DURATION_MS:
                     self._disarm()
                     self._print_odometry()
-                    self._io.write("\r\nLF DONE (10 s)  f=line  c=cal\r\n" + UI_prompt)
+                    # Brief pause as an indicator that the line-follow run has ended
+                    sleep_ms(500)
+                    self._io.write("\r\nLF DONE (10 s)  f=line  o=obstacle  p=bump-test  c=cal\r\n" + UI_prompt)
                     self._state = S1_CMD
+
+            # ---- S9: obstacle-course line-follow (stop on bump) ----
+            elif self._state == S9_OBS_LF:
+                elapsed = ticks_diff(ticks_ms(), self._lf_start_ms)
+
+                # allow keyboard cancel just like normal LF
+                if self._io.any():
+                    self._io.read1()   # consume key
+                    self._disarm()
+                    self._print_odometry()
+                    self._io.write("\r\nOBSTACLE CANCELLED  f=line  o=obstacle  c=cal\r\n" + UI_prompt)
+                    self._state = S1_CMD
+                    yield self._state
+                    continue
+
+                # if bump sensors are present and any bumper is hit, stop run
+                if (self._bump is not None) and self._bump.any():
+                    # Snap odometry to known wall coordinate before reporting
+                    if self._ctrl is not None and hasattr(self._ctrl, "set_odometry"):
+                        try:
+                            self._ctrl.set_odometry(self._wall_x_mm, self._wall_y_mm, 0.0)
+                        except Exception:
+                            pass
+                    self._disarm()
+                    self._print_odometry()
+                    # Brief pause as an indicator before transitioning to next command
+                    sleep_ms(500)
+                    self._io.write("\r\nOBSTACLE: bump detected, stopping run\r\n" + UI_prompt)
+                    self._state = S1_CMD
+                    yield self._state
+                    continue
+
+                # Reuse same ~50 ms print interval as LF for logging
+                now_ms = ticks_ms()
+                if ticks_diff(now_ms, self._lf_print_ms) >= 50:
+                    self._lf_print_ms = now_ms
+                    t_s = elapsed / 1000.0
+                    err = self._line_err.get() if self._line_err is not None else 0.0
+                    self._lf_print(t_s, err)
+
+                # No timeout here: obstacle course 'o' runs until bump or user cancel.
 
             # ---- S6: left motor test ----
             elif self._state == S6_MOT_L:
@@ -485,6 +566,30 @@ class task_user:
 
                 if ticks_diff(ticks_ms(), self._mot_start_ms) >= STRAIGHT_TEST_MS:
                     self._mot_test_done("STRAIGHT")
+
+            # ---- S10: bumper test mode ----
+            elif self._state == S10_BUMPTEST:
+                # exit on 'x' / 'q'
+                if self._io.any():
+                    b = self._io.read1()
+                    if b:
+                        try:
+                            ch = b.decode()
+                        except Exception:
+                            ch = ""
+                        if ch in {"x", "X", "q", "Q"}:
+                            self._io.write("\r\nExit bump test.\r\n" + UI_prompt)
+                            self._state = S1_CMD
+                            yield self._state
+                            continue
+
+                # If bump hardware is present, print whenever any bumper is pressed
+                if self._bump is not None and self._bump.any():
+                    left_hits, right_hits = self._bump.read_all()
+                    self._io.write("BUMP PRESSED  L={}  R={}\r\n".format(
+                        "".join("1" if b else "0" for b in left_hits),
+                        "".join("1" if b else "0" for b in right_hits),
+                    ))
 
             # ---- S5: calibration mode ----
             elif self._state == S5_CAL:

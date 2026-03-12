@@ -23,6 +23,8 @@ from task_imu import task_imu
 collect()
 from task_state_estimator import task_state_estimator
 collect()
+from bump_sensor import BumpSensors
+collect()
 from task_share import Share
 from cotask import Task, task_list
 collect()
@@ -49,16 +51,39 @@ rightMotor = motor_driver(Pin.cpu.B15, Pin.cpu.B14, Pin.cpu.C9, tim3, 4)
 leftEncoder  = encoder(1, pyb.Pin.cpu.A8, pyb.Pin.cpu.A9)
 rightEncoder = encoder(2, pyb.Pin.cpu.A0, pyb.Pin.cpu.A1)
 
+# Bumper boards (see lab pinout sheet)
+# LEFT bumper board:
+#   GND   -> CN7-20
+#   BUMP1 -> PB12
+#   BUMP2 -> PB11
+#   BUMP3 -> PC7
+# RIGHT bumper board:
+#   BUMP1 -> PA15
+#   BUMP2 -> PH0
+#   BUMP3 -> PH1
+left_bump_pins  = [Pin.cpu.B12, Pin.cpu.B11, Pin.cpu.C7]
+right_bump_pins = [Pin.cpu.A15, Pin.cpu.H0,  Pin.cpu.H1]
+bump_sensors = BumpSensors(left_pins=left_bump_pins, right_pins=right_bump_pins)
+
 pins = [
-    Pin.cpu.C0, Pin.cpu.C1, Pin.cpu.C2, Pin.cpu.C3, Pin.cpu.C4,
-    Pin.cpu.C5, Pin.cpu.B0, Pin.cpu.B1, Pin.cpu.A4
+    # Leftmost two sensors (C0, C1) disabled; we only use 7 sensors:
+    # C2, C3, C4, C5, B0, B1, A4  (center is C5/B0 pair, i.e. original sensor 7)
+    Pin.cpu.C2, Pin.cpu.C3, Pin.cpu.C4, Pin.cpu.C5,
+    Pin.cpu.B0, Pin.cpu.B1, Pin.cpu.A4,
 ]
 sensor_fun = multiple_ir_readings(*pins)
 
-# ADC calibration — update these from calibration mode ('c')
-black_adc = 300          #300 for new land
-white_adc = 250             #250
-line = L_sensor(sensor_fun, black=black_adc, white=white_adc, bias=0.0, sensor_count=9)
+# ADC calibration — per-sensor black/white arrays (left -> right).
+# Values from your measurements on the new land.
+black_adc = [310, 366, 341, 279, 293, 295, 261]
+white_adc = [256, 268, 260, 243, 247, 256, 235]
+line = L_sensor(
+    sensor_fun,
+    black=black_adc,
+    white=white_adc,
+    bias=0.0,
+    sensor_count=7,
+)
 
 # IMU — BNO055 on I2C1 (PB8=SCL, PB9=SDA)
 # rst_pin=None: PC8 is already used by the left motor PWM, so we skip HW reset
@@ -69,8 +94,8 @@ i2c = pyb.I2C(1, pyb.I2C.CONTROLLER, baudrate=400000)
 # Tuning parameters — edit these before flashing
 # -----------------
 BASE_EFFORT = 20.0   # raised — right motor needs >20% to overcome friction          20
-KP_LINE     = 3.0    # proportional gain on line error (raw value, no hidden scaling)
-KI_LINE     = .10    # integral gain on line error
+KP_LINE     = 4.0    # proportional gain on line error (raw value, no hidden scaling)
+KI_LINE     = .020    # integral gain on line error
                      # start at 0, raise slowly (e.g. 0.001) if robot drifts on long straights
 MAX_EFFORT  = 90.0   # hard ceiling on any single wheel PWM %
                      # must be > BASE_EFFORT or steering has no headroom
@@ -80,7 +105,7 @@ RIGHT_OFFSET = 2.0   # additive PWM % added to right wheel to correct straight-l
                      # tune with 's' key until encoder diff stays near 0
 
 # IMU stabilization gains (set to 0.0 to disable each term)
-YAW_RATE_GAIN = .00   # damps oscillation using gyro Z (deg/s) — increase if robot wiggles
+YAW_RATE_GAIN = .010   # damps oscillation using gyro Z (deg/s) — increase if robot wiggles
 HEADING_GAIN  = 0.0   # corrects heading drift using absolute Euler heading (deg)
 
 
@@ -189,6 +214,7 @@ user_obj = task_user(
     psi_hat_share=psi_hat,
     omL_hat_share=omL_hat,
     omR_hat_share=omR_hat,
+    bump_sensors=bump_sensors,
 )
 
 
