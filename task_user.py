@@ -122,9 +122,11 @@ class task_user:
 
         # bumper sensors (optional)
         self._bump = bump_sensors
-        # known wall pose (forward along +X from start)
-        self._wall_x_mm = 962.5
+        # known wall pose in global map coordinates
+        self._wall_x_mm = 1062.5
         self._wall_y_mm = 0.0
+        # obstacle-course helper: pause once after entering square (y < 600 mm)
+        self._obs_paused_after_square = False
 
         # calibration state
         self._white_adc    = None
@@ -461,12 +463,31 @@ class task_user:
                     yield self._state
                     continue
 
+                # Brief pause indicator once after entering the square region (y < 600 mm)
+                if (self._ctrl is not None) and (not self._obs_paused_after_square):
+                    try:
+                        x_mm, y_mm, hdeg, dist = self._ctrl.get_odometry()
+                        if y_mm < 600.0:
+                            # Temporarily stop line-follow motion as an indicator
+                            self._disarm()
+                            sleep_ms(500)
+                            # Re-arm and resume line-follow
+                            self._arm.put(True)
+                            self._lf_en.put(True)
+                            self._leftMotorGo.put(True)
+                            self._rightMotorGo.put(True)
+                            self._obs_paused_after_square = True
+                    except Exception:
+                        pass
+
                 # if bump sensors are present and any bumper is hit, stop run
                 if (self._bump is not None) and self._bump.any():
-                    # Snap odometry to known wall coordinate before reporting
+                    # Snap odometry to known wall X; keep current Y and heading.
                     if self._ctrl is not None and hasattr(self._ctrl, "set_odometry"):
                         try:
-                            self._ctrl.set_odometry(self._wall_x_mm, self._wall_y_mm, 0.0)
+                            x_mm, y_mm, hdeg, dist = self._ctrl.get_odometry()
+                            # At the wall, global heading is defined as 180 deg.
+                            self._ctrl.set_odometry(self._wall_x_mm, y_mm, 180.0)
                         except Exception:
                             pass
                     self._disarm()

@@ -74,8 +74,8 @@ pins = [
 sensor_fun = multiple_ir_readings(*pins)
 
 # ADC calibration — per-sensor black/white arrays (left -> right).
-# Values from your measurements on the new land.
-black_adc = [310, 366, 341, 279, 293, 295, 261]
+# Updated black values from your latest measurements.
+black_adc = [1627, 1566, 1500, 1046, 1114, 1294, 852]
 white_adc = [256, 268, 260, 243, 247, 256, 235]
 line = L_sensor(
     sensor_fun,
@@ -95,7 +95,7 @@ i2c = pyb.I2C(1, pyb.I2C.CONTROLLER, baudrate=400000)
 # -----------------
 BASE_EFFORT = 20.0   # raised — right motor needs >20% to overcome friction          20
 KP_LINE     = 4.0    # proportional gain on line error (raw value, no hidden scaling)
-KI_LINE     = .020    # integral gain on line error
+KI_LINE     = .010    # integral gain on line error
                      # start at 0, raise slowly (e.g. 0.001) if robot drifts on long straights
 MAX_EFFORT  = 90.0   # hard ceiling on any single wheel PWM %
                      # must be > BASE_EFFORT or steering has no headroom
