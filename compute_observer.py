@@ -18,7 +18,7 @@ from scipy.linalg import expm, solve_continuous_are
 # Romi parameters (from Lab 0x06)
 # ------------------------------------------------------------------ #
 r   = 0.035   # m   wheel radius
-w   = 0.149   # m   wheelbase
+w   = 0.141   # m   wheelbase
 tau = 0.05    # s   motor time constant
 Km  = 3.49    # rad/(V·s)  motor gain
 

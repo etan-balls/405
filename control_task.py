@@ -55,6 +55,10 @@ class task_control:
         # --- IMU stabilization (optional) ---
         imu_heading_share: Share = None,
         imu_yawrate_share: Share = None,
+        # --- Observer outputs (optional) ---
+        psi_hat_share: Share = None,
+        omL_hat_share: Share = None,
+        omR_hat_share: Share = None,
         # Backwards-compatible alias name:
         line_error_share: Share = None,
         max_vel_share: Share = None,
@@ -91,9 +95,15 @@ class task_control:
         # IMU stabilization (optional)
         self._imu_heading_share = imu_heading_share
         self._imu_yawrate_share = imu_yawrate_share
-        self._k_yawrate = 0.0   # steer damping gain using gyro Z (deg/s)
-        self._k_heading = 0.0   # heading hold gain using Euler heading (deg)
+        self._k_yawrate = 0.0
+        self._k_heading = 0.0
         self._heading_ref = None
+        self._curve_threshold_dps = 5.0
+
+        # Observer outputs (optional)
+        self._psi_hat_share = psi_hat_share
+        self._omL_hat_share = omL_hat_share
+        self._omR_hat_share = omR_hat_share
 
         # Common timing/logging
         self._startTime = 0
@@ -122,12 +132,15 @@ class task_control:
         # ---------------- Odometry ----------------
         # Dead-reckoning from encoder counts. Updated every control tick.
         # Reset to zero at the start of each run (when goFlag goes True).
-        self._WHEEL_TRACK_MM = 149.0   # mm between wheel contact patches (Romi)
+        self._WHEEL_TRACK_MM = 141.0   # mm between wheel contact patches (Romi)
         self._MM_PER_COUNT   = 0.15303 # (2*pi*35) / 1437.07
         self._odo_x   = 0.0   # mm, global X (forward from start)
         self._odo_y   = 0.0   # mm, global Y (left from start)
         self._odo_h   = 0.0   # radians, heading (0 = straight ahead)
         self._odo_dist = 0.0  # mm, total straight-line distance from start
+        self._odo_imu_h0 = None  # IMU heading (deg) at last odometry reset
+        self._odo_h_base = 0.0   # heading (rad) set at last reset
+        self._psi_hat_h0 = 0.0   # observer psi_hat (rad) at last odometry reset
         self._enc_l_prev = 0  # previous left encoder count
         self._enc_r_prev = 0  # previous right encoder count
         # reference to right encoder (must be set from main.py after construction)
@@ -144,27 +157,59 @@ class task_control:
         self._odo_x    = 0.0
         self._odo_y    = 0.0
         self._odo_h    = 0.0
+        self._odo_h_base = 0.0
         self._odo_dist = 0.0
+        self._psi_hat_h0 = 0.0
+        if self._psi_hat_share is not None:
+            try:
+                p = self._psi_hat_share.get()
+                if p is not None:
+                    self._psi_hat_h0 = float(p)
+            except Exception:
+                pass
+        self._odo_imu_h0 = None
+        if self._imu_heading_share is not None:
+            try:
+                h0 = self._imu_heading_share.get()
+                if h0 is not None:
+                    self._odo_imu_h0 = float(h0)
+            except Exception:
+                pass
         self._enc_l_prev = self._enc.get_position()
         if self._right_enc is not None:
             self._enc_r_prev = self._right_enc.get_position()
 
     def _odo_update(self):
-        """Update dead-reckoning position from encoder counts."""
+        """Update dead-reckoning position from encoder counts, with IMU-fused heading."""
         import math
         l_now = self._enc.get_position()
         r_now = self._right_enc.get_position() if self._right_enc is not None else self._enc_r_prev
 
-        # Both encoders count negative going forward; negate both so dl, dr > 0 fwd.
         dl = -((l_now - self._enc_l_prev) * self._MM_PER_COUNT)
         dr = -((r_now - self._enc_r_prev) * self._MM_PER_COUNT)
         self._enc_l_prev = l_now
         self._enc_r_prev = r_now
 
-        ds = (dl + dr) / 2.0          # forward displacement
-        dh = (dl - dr) / self._WHEEL_TRACK_MM   # heading change (rad)
+        ds = (dl + dr) / 2.0
 
-        self._odo_h += dh
+        if self._psi_hat_share is not None:
+            try:
+                psi = self._psi_hat_share.get()
+                if psi is not None:
+                    self._odo_h = self._odo_h_base + (float(psi) - self._psi_hat_h0)
+            except Exception:
+                self._odo_h += (dl - dr) / self._WHEEL_TRACK_MM
+        elif self._odo_imu_h0 is not None and self._imu_heading_share is not None:
+            try:
+                h_now = self._imu_heading_share.get()
+                if h_now is not None:
+                    dh_deg = self._wrap_deg(float(h_now) - self._odo_imu_h0)
+                    self._odo_h = self._odo_h_base + math.radians(dh_deg)
+            except Exception:
+                self._odo_h += (dl - dr) / self._WHEEL_TRACK_MM
+        else:
+            self._odo_h += (dl - dr) / self._WHEEL_TRACK_MM
+
         self._odo_x += ds * math.cos(self._odo_h)
         self._odo_y += ds * math.sin(self._odo_h)
         self._odo_dist = math.sqrt(self._odo_x ** 2 + self._odo_y ** 2)
@@ -187,7 +232,24 @@ class task_control:
         self._odo_x = float(x_mm)
         self._odo_y = float(y_mm)
         self._odo_h = math.radians(float(heading_deg))
+        self._odo_h_base = self._odo_h
         self._odo_dist = math.sqrt(self._odo_x ** 2 + self._odo_y ** 2)
+        self._psi_hat_h0 = 0.0
+        if self._psi_hat_share is not None:
+            try:
+                p = self._psi_hat_share.get()
+                if p is not None:
+                    self._psi_hat_h0 = float(p)
+            except Exception:
+                pass
+        self._odo_imu_h0 = None
+        if self._imu_heading_share is not None:
+            try:
+                h0 = self._imu_heading_share.get()
+                if h0 is not None:
+                    self._odo_imu_h0 = float(h0)
+            except Exception:
+                pass
 
     # ---------------- Speed-mode API ----------------
     def set_velocity_setpoint(self, vel_setpoint: float) -> None:
@@ -347,15 +409,23 @@ class task_control:
                     # reset odometry to global zero
                     self._odo_reset()
 
-                    # latch heading reference for heading-hold (optional)
+                    # latch heading reference for heading-hold (prefer observer)
                     self._heading_ref = None
-                    if self._line_mode_enabled() and (self._imu_heading_share is not None):
-                        try:
-                            h0 = self._imu_heading_share.get()
-                            if h0 is not None:
-                                self._heading_ref = float(h0)
-                        except Exception:
-                            self._heading_ref = None
+                    if self._line_mode_enabled():
+                        if self._psi_hat_share is not None:
+                            try:
+                                p0 = self._psi_hat_share.get()
+                                if p0 is not None:
+                                    self._heading_ref = float(p0) * 57.2958
+                            except Exception:
+                                pass
+                        if self._heading_ref is None and self._imu_heading_share is not None:
+                            try:
+                                h0 = self._imu_heading_share.get()
+                                if h0 is not None:
+                                    self._heading_ref = float(h0)
+                            except Exception:
+                                pass
 
                     self._state = S2_RUN
 
@@ -403,24 +473,47 @@ class task_control:
                     base = self._get_base_effort()
                     steer = (self._kp_line * err) + (self._ki_line * self._err_int_line)
 
-                    # ---- IMU stabilization (optional) ----
-                    # Gyro Z damping (deg/s)
-                    if self._imu_yawrate_share is not None and self._k_yawrate != 0.0:
+                    # ---- Yaw-rate damping (prefer observer, fallback to raw gyro) ----
+                    if self._k_yawrate != 0.0:
                         try:
-                            wz = self._imu_yawrate_share.get()
+                            wz = None
+                            if self._omL_hat_share is not None and self._omR_hat_share is not None:
+                                oL = self._omL_hat_share.get()
+                                oR = self._omR_hat_share.get()
+                                if oL is not None and oR is not None:
+                                    wz = (float(oR) - float(oL)) * 0.2482 * 57.2958
+                            if wz is None and self._imu_yawrate_share is not None:
+                                wz_raw = self._imu_yawrate_share.get()
+                                if wz_raw is not None:
+                                    wz = float(wz_raw)
                             if wz is not None:
-                                # Subtract damping so positive yaw rate reduces further turning
-                                steer -= (self._k_yawrate * float(wz))
+                                steer -= (self._k_yawrate * wz)
                         except Exception:
                             pass
 
-                    # Heading hold (degrees), referenced to heading at run start
-                    if self._imu_heading_share is not None and self._k_heading != 0.0 and (self._heading_ref is not None):
+                    # Heading hold (degrees), suppressed on curves
+                    if self._k_heading != 0.0 and (self._heading_ref is not None):
                         try:
-                            h = self._imu_heading_share.get()
+                            h = None
+                            wz_now = 0.0
+                            if self._psi_hat_share is not None:
+                                p = self._psi_hat_share.get()
+                                if p is not None:
+                                    h = float(p) * 57.2958
+                            if h is None and self._imu_heading_share is not None:
+                                h = self._imu_heading_share.get()
+                                if h is not None:
+                                    h = float(h)
+                            if self._imu_yawrate_share is not None:
+                                wz_raw = self._imu_yawrate_share.get()
+                                if wz_raw is not None:
+                                    wz_now = float(wz_raw)
                             if h is not None:
-                                h_err = self._wrap_deg(float(h) - float(self._heading_ref))
-                                steer -= (self._k_heading * h_err)
+                                if abs(wz_now) > self._curve_threshold_dps:
+                                    self._heading_ref = h
+                                else:
+                                    h_err = self._wrap_deg(h - float(self._heading_ref))
+                                    steer -= (self._k_heading * h_err)
                         except Exception:
                             pass
 

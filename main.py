@@ -3,6 +3,12 @@ from pyb import Pin, Timer, UART
 from gc import collect, mem_free
 
 collect()
+from task_share import Share
+collect()
+from cotask import Task, task_list
+collect()
+from task_user import task_user
+collect()
 from motor_driver import motor_driver
 collect()
 from encoder_driver import encoder
@@ -17,16 +23,11 @@ from control_task import task_control
 collect()
 from task_sensor import task_line_sensor
 collect()
-from task_user import task_user
-collect()
 from task_imu import task_imu
 collect()
 from task_state_estimator import task_state_estimator
 collect()
 from bump_sensor import BumpSensors
-collect()
-from task_share import Share
-from cotask import Task, task_list
 collect()
 print("RAM free after imports:", mem_free())
 
@@ -94,7 +95,7 @@ i2c = pyb.I2C(1, pyb.I2C.CONTROLLER, baudrate=400000)
 # Tuning parameters — edit these before flashing
 # -----------------
 BASE_EFFORT = 20.0   # raised — right motor needs >20% to overcome friction          20
-KP_LINE     = 4.0    # proportional gain on line error (raw value, no hidden scaling)
+KP_LINE     = 6.0    # proportional gain on line error (raw value, no hidden scaling)
 KI_LINE     = .010    # integral gain on line error
                      # start at 0, raise slowly (e.g. 0.001) if robot drifts on long straights
 MAX_EFFORT  = 90.0   # hard ceiling on any single wheel PWM %
@@ -106,7 +107,8 @@ RIGHT_OFFSET = 2.0   # additive PWM % added to right wheel to correct straight-l
 
 # IMU stabilization gains (set to 0.0 to disable each term)
 YAW_RATE_GAIN = .010   # damps oscillation using gyro Z (deg/s) — increase if robot wiggles
-HEADING_GAIN  = 0.0   # corrects heading drift using absolute Euler heading (deg)
+HEADING_GAIN  = 0.35   # corrects heading drift using absolute Euler heading (deg)
+CURVE_THRESH  = 20.0   # deg/s — yaw rate above this suppresses heading hold on curves
 
 
 # -----------------
@@ -172,6 +174,9 @@ ctrl_obj = task_control(
     base_effort_share=baseEffort,
     imu_heading_share=imu_heading_deg,
     imu_yawrate_share=imu_yaw_rate_dps,
+    psi_hat_share=psi_hat,
+    omL_hat_share=omL_hat,
+    omR_hat_share=omR_hat,
 )
 ctrl_obj._kp_line    = KP_LINE
 ctrl_obj._ki_line    = KI_LINE
@@ -179,6 +184,7 @@ ctrl_obj._max_effort = MAX_EFFORT
 ctrl_obj._right_offset = RIGHT_OFFSET   # additive right-wheel trim
 ctrl_obj._right_enc    = rightEncoder   # needed for odometry
 ctrl_obj.set_imu_gains(yawrate_gain=YAW_RATE_GAIN, heading_gain=HEADING_GAIN)
+ctrl_obj._curve_threshold_dps = CURVE_THRESH
 
 est_obj = task_state_estimator(
     leftEncoder, rightEncoder,
@@ -222,7 +228,7 @@ user_obj = task_user(
 # Scheduler — ctrlR removed, ctrl_obj drives both wheels
 # -----------------
 task_list.append(Task(sensor_obj.run,   name="Sensor", priority=5, period=20))
-task_list.append(Task(imu_task_obj.run, name="IMU",    priority=5, period=20))  # designed for Ts=20ms
+task_list.append(Task(imu_task_obj.run, name="IMU",    priority=5, period=20))
 task_list.append(Task(ctrl_obj.run,     name="Ctrl",   priority=4, period=20))
 task_list.append(Task(motL_obj.run,     name="MotL",   priority=3, period=20))
 task_list.append(Task(motR_obj.run,     name="MotR",   priority=3, period=20))

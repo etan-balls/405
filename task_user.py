@@ -1,644 +1,350 @@
-# task_user.py - f=line follow (10s), x=cancel, c=calibrate, l/r=motor test (2s)
-
-import sys
-import uselect
-import micropython
+import sys, uselect, micropython
 from utime import ticks_ms, ticks_diff, sleep_ms
 from task_share import Share
-from bump_sensor import BumpSensors
 
-S0_INIT    = micropython.const(0)
-S1_CMD     = micropython.const(1)
-S4_LF        = micropython.const(4)
-S5_CAL       = micropython.const(5)   # calibration mode
-S6_MOT_L     = micropython.const(6)   # left motor test (2 s)
-S7_MOT_R     = micropython.const(7)   # right motor test (2 s)
-S8_STRAIGHT  = micropython.const(8)   # straight-line trim test (3 s)
-S9_OBS_LF    = micropython.const(9)   # obstacle-course line follow using bump sensors
-S10_BUMPTEST = micropython.const(10)  # bumper sensor test mode
+S0=micropython.const(0)
+S1=micropython.const(1)
+S4=micropython.const(4)
+S5=micropython.const(5)
+S9=micropython.const(9)
+S11=micropython.const(11)
+S12=micropython.const(12)
+S13=micropython.const(13)
+S14=micropython.const(14)
+S15=micropython.const(15)
 
-LF_DURATION_MS      = micropython.const(10_000)  # 10 seconds
-MOT_TEST_MS         = micropython.const(2_000)   # 2 seconds
-STRAIGHT_TEST_MS    = micropython.const(3_000)   # 3 seconds
-MOT_TEST_EFFORT     = micropython.const(30)      # PWM % for motor test
-CAL_PRINT_MS        = micropython.const(200)     # print interval during cal
-MM_PER_COUNT        = 0.15303                    # wheel radius 35mm, 1437.07 CPR
-
-UI_prompt = ">: "
-N_SENSORS = 9
-
+LF_MS=micropython.const(10000)
+ME=micropython.const(30)
+CAL_MS=micropython.const(200)
+MPC=0.15303
+PR=">: "
 
 class _IO:
     def __init__(self):
-        self._poll = uselect.poll()
-        self._poll.register(sys.stdin, uselect.POLLIN)
-
+        self._p=uselect.poll(); self._p.register(sys.stdin,uselect.POLLIN)
     def any(self):
-        try:
-            return 1 if self._poll.poll(0) else 0
-        except Exception:
-            return 0
-
+        try: return 1 if self._p.poll(0) else 0
+        except: return 0
     def read1(self):
-        if not self.any():
-            return None
+        if not self.any(): return None
         try:
-            ch = sys.stdin.read(1)
-            if not ch:
-                return None
-            return ch.encode() if isinstance(ch, str) else ch
-        except Exception:
-            return None
-
-    def write(self, s):
-        try:
-            sys.stdout.write(s)
-        except Exception:
-            pass
-
+            c=sys.stdin.read(1)
+            if not c: return None
+            return c.encode() if isinstance(c,str) else c
+        except: return None
+    def write(self,s):
+        try: sys.stdout.write(s)
+        except: pass
 
 class task_user:
-    def __init__(self,
-                 leftMotorGo: Share, rightMotorGo: Share,
-                 lineFollowEnable: Share,
-                 armEnable: Share,
-                 lineSensor,
-                 lineError: Share = None,
-                 leftEffortCmd: Share = None,    # needed for motor test
-                 rightEffortCmd: Share = None,   # needed for motor test
-                 leftEncoder=None,               # encoder for position printing
-                 rightEncoder=None,              # encoder for position printing
-                 leftMotorDriver=None,           # motor driver object for direct test control
-                 rightMotorDriver=None,          # motor driver object for direct test control
-                 imu_heading: Share = None,      # BNO055 Euler heading (deg)
-                 imu_yawrate: Share = None,      # BNO055 gyro Z (deg/s)
-                 imu_calib: Share = None,        # packed calibration status byte
-                 right_offset: float = 0.0,      # additive right-wheel trim for straight test
-                 ctrl=None,                      # control task object for odometry readout
-                 s_hat_share: Share = None,      # state estimator arc-length (m)
-                 psi_hat_share: Share = None,    # state estimator heading (rad)
-                 omL_hat_share: Share = None,    # state estimator left wheel speed (rad/s)
-                 omR_hat_share: Share = None,    # state estimator right wheel speed (rad/s)
-                 bump_sensors: BumpSensors = None):  # bumper boards (optional)
-        self._state        = S0_INIT
-        self._leftMotorGo  = leftMotorGo
-        self._rightMotorGo = rightMotorGo
-        self._lf_en        = lineFollowEnable
-        self._arm          = armEnable
-        self._sensor       = lineSensor
-        self._line_err     = lineError
-        self._lf_start_ms   = 0
-        self._lf_print_ms   = 0      # throttle print rate during LF
-        self._lf_enc_l0     = 0
-        self._lf_enc_r0     = 0
-        self._lf_s_hat0     = 0.0
-        self._lf_s_hat_init = False  # latch s_hat on first display tick
+    def __init__(self,leftMotorGo,rightMotorGo,lineFollowEnable,armEnable,
+                 lineSensor,lineError=None,leftEffortCmd=None,rightEffortCmd=None,
+                 leftEncoder=None,rightEncoder=None,leftMotorDriver=None,
+                 rightMotorDriver=None,imu_heading=None,imu_yawrate=None,
+                 imu_calib=None,right_offset=0.0,ctrl=None,s_hat_share=None,
+                 psi_hat_share=None,omL_hat_share=None,omR_hat_share=None,
+                 bump_sensors=None):
+        self._st=S0
+        self._lgo=leftMotorGo;self._rgo=rightMotorGo
+        self._lfen=lineFollowEnable;self._arm=armEnable
+        self._sen=lineSensor;self._lerr=lineError
+        self._lf_t0=0;self._lf_pt=0
+        self._lefc=leftEffortCmd;self._refc=rightEffortCmd
+        self._le=leftEncoder;self._re=rightEncoder
+        self._ld=leftMotorDriver;self._rd=rightMotorDriver
+        self._imuh=imu_heading;self._imuw=imu_yawrate;self._imuc=imu_calib
+        self._roff=float(right_offset);self._ctrl=ctrl
+        self._bump=bump_sensors
+        self._wx=1062.5;self._sx=100.0;self._sy=800.0
+        self._oset=False;self._fx=False;self._fy=True
+        self._opas=False;self._otrg=0.0;self._oti0=0.0;self._otnxt=S12
+        self._bk0=[0,0];self._wa=None;self._ba=None;self._cpt=0;self._lft=False
+        self._rlatch=None;self._oblk=False
+        self._io=_IO()
 
-        # motor test effort shares (optional but recommended)
-        self._leftEffortCmd  = leftEffortCmd
-        self._rightEffortCmd = rightEffortCmd
-        self._leftEncoder    = leftEncoder
-        self._rightEncoder   = rightEncoder
-        self._leftMotorDrv   = leftMotorDriver
-        self._rightMotorDrv  = rightMotorDriver
-        self._mot_start_ms   = 0    # timer for motor test states
-        self._mot_print_ms   = 0    # throttle position print rate
+    def _dis(self):
+        self._arm.put(False);self._lfen.put(False)
+        self._lgo.put(False);self._rgo.put(False)
+        if self._lefc: self._lefc.put(0.0)
+        if self._refc: self._refc.put(0.0)
 
-        # IMU shares (optional)
-        self._imu_heading  = imu_heading
-        self._imu_yawrate  = imu_yawrate
-        self._imu_calib    = imu_calib
+    def _ms(self):
+        if self._ld: self._ld.set_effort(0)
+        if self._rd: self._rd.set_effort(0)
 
-        # right wheel offset for straight test
-        self._right_offset = float(right_offset)
-        self._ctrl = ctrl
+    def _eu(self):
+        if self._le: self._le.update()
+        if self._re: self._re.update()
+        if self._ctrl:
+            try: self._ctrl._odo_update()
+            except: pass
 
-        # state estimator shares (optional)
-        self._s_hat      = s_hat_share
-        self._psi_hat    = psi_hat_share
-        self._omL_hat    = omL_hat_share
-        self._omR_hat    = omR_hat_share
-        self._lf_psi_hat0 = 0.0
+    def _op(self):
+        if not self._ctrl: return None
+        try:
+            x,y,h,d=self._ctrl.get_odometry()
+            if self._fx: x=2.0*self._sx-x
+            if self._fy: y=2.0*self._sy-y
+            return x,y,h,d
+        except: return None
 
-        # bumper sensors (optional)
-        self._bump = bump_sensors
-        # known wall pose in global map coordinates
-        self._wall_x_mm = 1062.5
-        self._wall_y_mm = 0.0
-        # obstacle-course helper: pause once after entering square (y < 600 mm)
-        self._obs_paused_after_square = False
+    def _cancel(self,msg):
+        self._dis();self._ms()
+        if self._ctrl:
+            x,y,h,d=self._ctrl.get_odometry()
+            self._io.write("X={:.1f} Y={:.1f} H={:.1f} D={:.1f}\r\n".format(x,y,h,d))
+        self._io.write(msg+PR);self._st=S1
 
-        # calibration state
-        self._white_adc    = None
-        self._black_adc    = None
-        self._cal_print_ms = 0
+    def _chk(self,msg):
+        if self._io.any():
+            self._io.read1();self._cancel(msg);return True
+        return False
 
-        self._io = _IO()
-        self._io.write("User Task instantiated\r\n")
+    def _imu_h(self):
+        if self._imuh is None: return 0.0
+        v=self._imuh.get()
+        return float(v) if v is not None else 0.0
 
-    # ------------------------------------------------------------------
-    def _disarm(self):
-        self._arm.put(False)
-        self._lf_en.put(False)
-        self._leftMotorGo.put(False)
-        self._rightMotorGo.put(False)
-        if self._leftEffortCmd is not None:
-            self._leftEffortCmd.put(0.0)
-        if self._rightEffortCmd is not None:
-            self._rightEffortCmd.put(0.0)
+    def _olog(self,tag):
+        p=self._op()
+        if p:
+            self._io.write("{},{:.1f},{:.1f},{:.1f},{:.1f},{:.1f},{:.1f}\r\n".format(
+                tag,p[0]-self._sx,p[1]-self._sy,p[0],p[1],p[2],p[3]))
 
-    def _print_odometry(self):
-        if self._ctrl is None:
-            return
-        x, y, hdeg, dist = self._ctrl.get_odometry()
-        self._io.write("--- Position from start ---\r\n")
-        self._io.write("  X={:.1f}mm  Y={:.1f}mm  Heading={:.1f}deg\r\n".format(x, y, hdeg))
-        self._io.write("  Straight-line dist={:.1f}mm\r\n".format(dist))
+    def _drv(self,de):
+        if self._ld: self._ld.enable();self._ld.set_effort(de)
+        if self._rd: self._rd.enable();self._rd.set_effort(de-self._roff)
 
-    def _lf_begin(self):
-        self._arm.put(True)
-        self._lf_en.put(True)
-        self._leftMotorGo.put(True)
-        self._rightMotorGo.put(True)
-        self._lf_start_ms = ticks_ms()
-        # Zero encoders now so display distances always start at 0.
-        # The control task also zeros the left encoder on its next tick — that is fine.
-        if self._leftEncoder  is not None: self._leftEncoder.zero()
-        if self._rightEncoder is not None: self._rightEncoder.zero()
-        self._lf_enc_l0     = 0
-        self._lf_enc_r0     = 0
-        self._lf_s_hat0     = 0.0
-        self._lf_psi_hat0   = 0.0
-        self._lf_s_hat_init = False  # will latch on first display tick
-        self._lf_imu_psi0   = (self._imu_heading.get() or 0.0) if self._imu_heading is not None else 0.0
-        self._io.write("LF ON (10 s)\r\n")
-        # Column order: error first so logs begin with line error
-        self._io.write("err,t_s,sL_meas,sR_meas,psi_imu,pdot_imu,sL_hat,sR_hat,psi_hat,pdot_hat,omL_hat,omR_hat\r\n")
-        # Drain any trailing \r or \n left in the buffer from the command
-        # that triggered this (e.g. step_tool sends 'f\r\n' so the \n
-        # would immediately cancel the run on the next tick).
-        while self._io.any():
-            self._io.read1()
-        self._state = S4_LF
-
-    def _obs_begin(self):
-        """
-        Begin obstacle-course run.
-
-        Currently implemented as a line-follow segment which runs until a bumper
-        is pressed (or cancelled from the terminal). This reuses the same
-        encoder/IMU zeroing as _lf_begin() but switches to S9_OBS_LF so we can
-        add more obstacle-course phases later.
-        """
-        self._lf_begin()
-        self._io.write("OBSTACLE COURSE: line follow until bump hit  (o to start)\r\n")
-        self._state = S9_OBS_LF
-
-    def _lf_print(self, t_s, err):
-        if self._leftEncoder  is not None: self._leftEncoder.update()
-        if self._rightEncoder is not None: self._rightEncoder.update()
-        l_pos = (self._leftEncoder.get_position()  - self._lf_enc_l0) if self._leftEncoder  is not None else 0
-        r_pos = (self._rightEncoder.get_position() - self._lf_enc_r0) if self._rightEncoder is not None else 0
-        sL_m = -l_pos * MM_PER_COUNT
-        sR_m = -r_pos * MM_PER_COUNT
-        psi_imu  = ((self._imu_heading.get() or 0.0) - self._lf_imu_psi0) * 0.017453 if self._imu_heading is not None else 0.0
-        pdot_imu = (self._imu_yawrate.get() or 0.0) * 0.017453 if self._imu_yawrate is not None else 0.0
-        s_hat_v   = (self._s_hat.get()   or 0.0) if self._s_hat   is not None else 0.0
-        psi_hat_v = (self._psi_hat.get() or 0.0) if self._psi_hat is not None else 0.0
-        omL_v     = (self._omL_hat.get() or 0.0) if self._omL_hat is not None else 0.0
-        omR_v     = (self._omR_hat.get() or 0.0) if self._omR_hat is not None else 0.0
-        if not self._lf_s_hat_init:
-            self._lf_s_hat0     = s_hat_v
-            self._lf_psi_hat0   = psi_hat_v
-            self._lf_s_hat_init = True
-        s_rel    = s_hat_v   - self._lf_s_hat0
-        psi_rel  = psi_hat_v - self._lf_psi_hat0
-        sL_hat_v = (s_rel - 0.0745 * psi_rel) * 1000.0
-        sR_hat_v = (s_rel + 0.0745 * psi_rel) * 1000.0
-        pdot_hat = (omR_v - omL_v) * 0.2349
-        # err in first column, time second
-        self._io.write("{:+.4f},{:.3f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.3f},{:.3f}\r\n".format(
-            err, t_s, sL_m, sR_m, psi_imu, pdot_imu, sL_hat_v, sR_hat_v, psi_rel, pdot_hat, omL_v, omR_v))
-
-    # ------------------------------------------------------------------
-    # Motor test helpers
-    # ------------------------------------------------------------------
-    def _mot_test_begin(self, left: bool):
-        # Full disarm: keep ALL task flags False so no other task touches motors
-        self._arm.put(False)
-        self._lf_en.put(False)
-        self._leftMotorGo.put(False)
-        self._rightMotorGo.put(False)
-        if self._leftEffortCmd is not None:
-            self._leftEffortCmd.put(0.0)
-        if self._rightEffortCmd is not None:
-            self._rightEffortCmd.put(0.0)
-
-        if left:
-            # Zero right motor effort; leave hardware state to task_motor
-            if self._rightMotorDrv is not None:
-                self._rightMotorDrv.set_effort(0)
-            if self._leftMotorDrv is not None:
-                self._leftMotorDrv.enable()
-                self._leftMotorDrv.set_effort(-MOT_TEST_EFFORT)
-            self._io.write("LEFT motor test ON (2 s)  x=cancel\r\n")
-            self._state = S6_MOT_L
-        else:
-            # Zero left motor effort; leave hardware state to task_motor
-            if self._leftMotorDrv is not None:
-                self._leftMotorDrv.set_effort(0)
-            if self._rightMotorDrv is not None:
-                self._rightMotorDrv.enable()
-                self._rightMotorDrv.set_effort(-MOT_TEST_EFFORT)
-            self._io.write("RIGHT motor test ON (2 s)  x=cancel\r\n")
-            self._state = S7_MOT_R
-
-        self._mot_start_ms = ticks_ms()
-        self._mot_print_ms = ticks_ms()
-        # Drain trailing \r\n from the triggering keypress
-        while self._io.any():
-            self._io.read1()
-
-    def _straight_begin(self):
-        self._arm.put(False)
-        self._lf_en.put(False)
-        self._leftMotorGo.put(False)
-        self._rightMotorGo.put(False)
-        if self._leftEffortCmd is not None:
-            self._leftEffortCmd.put(0.0)
-        if self._rightEffortCmd is not None:
-            self._rightEffortCmd.put(0.0)
-
-        effort = float(MOT_TEST_EFFORT)
-        r_offset = self._right_offset if self._right_offset is not None else 0.0
-        if self._leftMotorDrv is not None:
-            self._leftMotorDrv.enable()
-            self._leftMotorDrv.set_effort(-effort)
-        if self._rightMotorDrv is not None:
-            self._rightMotorDrv.enable()
-            self._rightMotorDrv.set_effort(-(effort + r_offset))
-
-        self._io.write("STRAIGHT test ON (3 s)  x=cancel\r\n")
-        self._io.write("Veers LEFT  -> increase RIGHT_OFFSET in main.py\r\n")
-        self._io.write("Veers RIGHT -> decrease RIGHT_OFFSET (or go negative)\r\n")
-        self._mot_start_ms = ticks_ms()
-        self._mot_print_ms = ticks_ms()
-        while self._io.any():
-            self._io.read1()
-        self._state = S8_STRAIGHT
-
-    def _mot_test_done(self, label: str):
-        # Zero effort on both drivers directly (they were driven directly during the test)
-        # then hand ownership back to task_motor by zeroing all flags.
-        # Do NOT call disable() here — task_motor will call _safe_off() itself
-        # on the next tick when it sees arm=False/goFlag=False, keeping its
-        # internal state consistent and allowing a clean restart via 'f'.
-        if self._leftMotorDrv is not None:
-            self._leftMotorDrv.set_effort(0)
-        if self._rightMotorDrv is not None:
-            self._rightMotorDrv.set_effort(0)
-        self._arm.put(False)
-        self._lf_en.put(False)
-        self._leftMotorGo.put(False)
-        self._rightMotorGo.put(False)
-        if self._leftEffortCmd is not None:
-            self._leftEffortCmd.put(0.0)
-        if self._rightEffortCmd is not None:
-            self._rightEffortCmd.put(0.0)
-        self._io.write("\r\n{} test DONE  f=start  l=left  r=right  c=calibrate\r\n".format(label) + UI_prompt)
-        self._state = S1_CMD
-
-    # ------------------------------------------------------------------
-    # Calibration helpers
-    # ------------------------------------------------------------------
-    def _cal_enter(self):
-        self._disarm()
-        self._white_adc = None
-        self._black_adc = None
-        self._cal_print_ms = ticks_ms() - CAL_PRINT_MS  # print immediately
-        self._io.write("\r\n--- CALIBRATION MODE ---\r\n")
-        self._io.write("w=capture white  b=capture black  x=exit\r\n")
-        # Drain trailing \r\n from the 'c' command
-        while self._io.any():
-            self._io.read1()
-        self._state = S5_CAL
-
-    def _cal_print_live(self, readings):
-        # compute error using current cal values (or raw if not calibrated)
-        white = self._white_adc if self._white_adc is not None else min(readings)
-        black = self._black_adc if self._black_adc is not None else max(readings)
-        scale = black - white
-        if scale == 0:
-            error = 0.0
-        else:
-            weights = [i - (N_SENSORS - 1) / 2.0 for i in range(N_SENSORS)]
-            num = 0.0
-            den = 0.0
-            for w, r in zip(weights, readings):
-                n = max(0.0, min(1.0, (r - white) / scale))
-                num += w * n
-                den += n
-            error = (num / den) if den > 0.01 else 0.0
-
-        # status line: W/B capture state
-        w_str = str(self._white_adc) if self._white_adc is not None else "???"
-        b_str = str(self._black_adc) if self._black_adc is not None else "???"
-        adc_str = ",".join(str(int(r)) for r in readings)
-        self._io.write("W={} B={} ERR={:+.3f} | {}\r\n".format(
-            w_str, b_str, error, adc_str))
-
-    def _cal_capture_white(self, readings):
-        self._white_adc = int(sum(readings) / len(readings))
-        self._io.write(">> WHITE captured: {}\r\n".format(self._white_adc))
-        self._cal_try_recommend()
-
-    def _cal_capture_black(self, readings):
-        self._black_adc = int(max(readings))
-        self._io.write(">> BLACK captured: {}\r\n".format(self._black_adc))
-        self._cal_try_recommend()
-
-    def _cal_try_recommend(self):
-        if self._white_adc is None or self._black_adc is None:
-            return
-        w = self._white_adc
-        b = self._black_adc
-        contrast = abs(b - w) / 4095.0 * 100.0
-        self._io.write("\r\n=== CAL RESULTS ===\r\n")
-        self._io.write("white_adc={} black_adc={} contrast={:.1f}%\r\n".format(w, b, contrast))
-        self._io.write("Copy into main.py: black_adc={} white_adc={}\r\n".format(b, w))
-        self._io.write("Press x to exit.\r\n")
-
-    # ------------------------------------------------------------------
-    # Main generator
-    # ------------------------------------------------------------------
     def run(self):
         while True:
+            if self._st==S0:
+                self._dis()
+                self._io.write("\r\nREADY f=tune o=obs c=cal\r\n"+PR)
+                self._st=S1
 
-            # ---- S0: init ----
-            if self._state == S0_INIT:
-                self._disarm()
-                self._io.write(
-                    "\r\nREADY  f=line  l=left  r=right  s=straight  o=obstacle  p=bump-test  c=cal\r\n"
-                    + UI_prompt
-                )
-                self._state = S1_CMD
-
-            # ---- S1: waiting for keypress ----
-            elif self._state == S1_CMD:
+            elif self._st==S1:
                 if self._io.any():
-                    b = self._io.read1()
+                    b=self._io.read1()
                     if b:
-                        try:
-                            ch = b.decode()
-                        except Exception:
-                            ch = ""
-
-                        if ch in {"f", "F"}:
-                            self._lf_begin()
-                        elif ch in {"l", "L"}:
-                            self._mot_test_begin(left=True)
-                        elif ch in {"r", "R"}:
-                            self._mot_test_begin(left=False)
-                        elif ch in {"s", "S"}:
-                            self._straight_begin()
-                        elif ch in {"c", "C"}:
-                            self._cal_enter()
-                        elif ch in {"o", "O"}:
-                            self._obs_begin()
-                        elif ch in {"p", "P"}:
-                            # Simple interactive bumper test; motors stay disarmed
-                            self._disarm()
-                            self._io.write("\r\nBUMP TEST MODE  (press x to exit)\r\n")
-                            self._state = S10_BUMPTEST
+                        try: ch=b.decode()
+                        except: ch=""
+                        if ch in("f","F"):
+                            self._arm.put(True);self._lfen.put(True);self._lgo.put(True);self._rgo.put(True)
+                            self._lf_t0=ticks_ms();self._lft=True
+                            if self._le: self._le.zero()
+                            if self._re: self._re.zero()
+                            if self._ctrl and hasattr(self._ctrl,"set_odometry"):
+                                try: self._ctrl.set_odometry(0.0,0.0,0.0)
+                                except: pass
+                            self._io.write("TUNE 2m x=cancel\r\nerr,X,Y,h,d\r\n")
+                            while self._io.any(): self._io.read1()
+                            self._st=S4
+                        elif ch in("c","C"):
+                            self._dis();self._wa=None;self._ba=None
+                            self._cpt=ticks_ms()-CAL_MS
+                            self._io.write("\r\nCAL: w=white b=black x=exit\r\n")
+                            while self._io.any(): self._io.read1()
+                            self._st=S5
+                        elif ch in("o","O"):
+                            self._oset=False;self._opas=False
+                            self._arm.put(True);self._lfen.put(True);self._lgo.put(True);self._rgo.put(True)
+                            self._lf_t0=ticks_ms();self._lft=False
+                            if self._le: self._le.zero()
+                            if self._re: self._re.zero()
+                            self._io.write("OBS: line follow\r\nerr,lx,ly,X,Y,h,d\r\n")
+                            while self._io.any(): self._io.read1()
+                            self._st=S9
                         else:
-                            self._disarm()
-                            self._io.write(
-                                "\r\nSTOPPED  f=line  l=left  r=right  s=straight  o=obstacle  p=bump-test  c=cal\r\n"
-                                + UI_prompt
-                            )
+                            self._dis();self._io.write("\r\nSTOPPED\r\n"+PR)
+                        yield self._st;continue
 
-                        yield self._state
-                        continue
+            elif self._st==S4:
+                el=ticks_diff(ticks_ms(),self._lf_t0)
+                if self._chk("\r\nLF CANCEL\r\n"): yield self._st;continue
+                n=ticks_ms()
+                if ticks_diff(n,self._lf_pt)>=50:
+                    self._lf_pt=n
+                    err=self._lerr.get() if self._lerr else 0.0
+                    if self._lft and self._ctrl:
+                        x,y,h,d=self._ctrl.get_odometry()
+                        self._io.write("{:+.4f},{:.1f},{:.1f},{:.1f},{:.1f}\r\n".format(err,x,y,h,d))
+                dn=False
+                if self._lft and self._ctrl:
+                    _,_,_,d=self._ctrl.get_odometry()
+                    if d>=2000.0: dn=True
+                if el>=LF_MS: dn=True
+                if dn:
+                    self._dis();self._io.write("\r\nLF DONE\r\n"+PR);self._st=S1
 
-            # ---- S4: line-follow timed run ----
-            elif self._state == S4_LF:
-                elapsed = ticks_diff(ticks_ms(), self._lf_start_ms)
-                if self._io.any():
-                    self._io.read1()   # consume key
-                    self._disarm()
-                    self._print_odometry()
-                    self._io.write("\r\nLF CANCELLED  f=line  o=obstacle  p=bump-test  c=cal\r\n" + UI_prompt)
-                    self._state = S1_CMD
-                    yield self._state
-                    continue
-
-                # Print line error + encoder data at ~50 ms intervals
-                now_ms = ticks_ms()
-                if ticks_diff(now_ms, self._lf_print_ms) >= 50:
-                    self._lf_print_ms = now_ms
-                    t_s = elapsed / 1000.0
-                    err = self._line_err.get() if self._line_err is not None else 0.0
-
-                    self._lf_print(t_s, err)
-
-                if elapsed >= LF_DURATION_MS:
-                    self._disarm()
-                    self._print_odometry()
-                    # Brief pause as an indicator that the line-follow run has ended
-                    sleep_ms(500)
-                    self._io.write("\r\nLF DONE (10 s)  f=line  o=obstacle  p=bump-test  c=cal\r\n" + UI_prompt)
-                    self._state = S1_CMD
-
-            # ---- S9: obstacle-course line-follow (stop on bump) ----
-            elif self._state == S9_OBS_LF:
-                elapsed = ticks_diff(ticks_ms(), self._lf_start_ms)
-
-                # allow keyboard cancel just like normal LF
-                if self._io.any():
-                    self._io.read1()   # consume key
-                    self._disarm()
-                    self._print_odometry()
-                    self._io.write("\r\nOBSTACLE CANCELLED  f=line  o=obstacle  c=cal\r\n" + UI_prompt)
-                    self._state = S1_CMD
-                    yield self._state
-                    continue
-
-                # Brief pause indicator once after entering the square region (y < 600 mm)
-                if (self._ctrl is not None) and (not self._obs_paused_after_square):
+            elif self._st==S9:
+                if not self._oset and self._ctrl and hasattr(self._ctrl,"set_odometry"):
+                    try: self._ctrl.set_odometry(self._sx,self._sy,0.0);self._oset=True
+                    except: pass
+                if self._rlatch is not None and self._ctrl and hasattr(self._ctrl,"set_odometry"):
+                    try: self._ctrl.set_odometry(self._rlatch[0],self._rlatch[1],self._rlatch[2])
+                    except: pass
+                    self._rlatch=None
+                if self._chk("\r\nOBS CANCEL\r\n"): yield self._st;continue
+                if self._ctrl and not self._opas:
                     try:
-                        x_mm, y_mm, hdeg, dist = self._ctrl.get_odometry()
-                        if y_mm < 600.0:
-                            # Temporarily stop line-follow motion as an indicator
-                            self._disarm()
-                            sleep_ms(500)
-                            # Re-arm and resume line-follow
-                            self._arm.put(True)
-                            self._lf_en.put(True)
-                            self._leftMotorGo.put(True)
-                            self._rightMotorGo.put(True)
-                            self._obs_paused_after_square = True
-                    except Exception:
-                        pass
-
-                # if bump sensors are present and any bumper is hit, stop run
-                if (self._bump is not None) and self._bump.any():
-                    # Snap odometry to known wall X; keep current Y and heading.
-                    if self._ctrl is not None and hasattr(self._ctrl, "set_odometry"):
+                        p=self._op()
+                        if p and p[1]<600.0:
+                            self._dis();self._ms();self._opas=True
+                            self._otrg=90.0;self._oti0=p[2];self._otnxt=S13
+                            self._io.write("TURN h={:.1f} trg=90 Y={:.0f}\r\n".format(p[2],p[1]))
+                            sleep_ms(300);self._lf_pt=ticks_ms()
+                            self._st=S11;yield self._st;continue
+                    except: pass
+                if self._bump and self._bump.any():
+                    if self._ctrl and hasattr(self._ctrl,"set_odometry"):
                         try:
-                            x_mm, y_mm, hdeg, dist = self._ctrl.get_odometry()
-                            # At the wall, global heading is defined as 180 deg.
-                            self._ctrl.set_odometry(self._wall_x_mm, y_mm, 180.0)
-                        except Exception:
-                            pass
-                    self._disarm()
-                    self._print_odometry()
-                    # Brief pause as an indicator before transitioning to next command
-                    sleep_ms(500)
-                    self._io.write("\r\nOBSTACLE: bump detected, stopping run\r\n" + UI_prompt)
-                    self._state = S1_CMD
-                    yield self._state
-                    continue
+                            x,y,h,d=self._ctrl.get_odometry()
+                            self._ctrl.set_odometry(self._wx,y,180.0)
+                        except: pass
+                    self._cancel("\r\nOBS bump\r\n");yield self._st;continue
+                if self._oblk and self._sen:
+                    try:
+                        rd=self._sen.get_raw_readings()
+                        bk=self._sen.black;wh=self._sen.white
+                        allb=True
+                        for i in range(len(rd)):
+                            b_i=bk[i] if isinstance(bk,(list,tuple)) else bk
+                            w_i=wh[i] if isinstance(wh,(list,tuple)) else wh
+                            mid=(b_i+w_i)/2.0
+                            if rd[i]<mid: allb=False;break
+                        if allb:
+                            self._oblk=False
+                            self._cancel("\r\nALL BLACK STOP\r\n")
+                            yield self._st;continue
+                    except: pass
+                n=ticks_ms()
+                if ticks_diff(n,self._lf_pt)>=50:
+                    self._lf_pt=n
+                    err=self._lerr.get() if self._lerr else 0.0
+                    p=self._op()
+                    if p:
+                        self._io.write("{:+.4f},{:.1f},{:.1f},{:.1f},{:.1f},{:.1f},{:.1f}\r\n".format(
+                            err,p[0]-self._sx,p[1]-self._sy,p[0],p[1],p[2],p[3]))
 
-                # Reuse same ~50 ms print interval as LF for logging
-                now_ms = ticks_ms()
-                if ticks_diff(now_ms, self._lf_print_ms) >= 50:
-                    self._lf_print_ms = now_ms
-                    t_s = elapsed / 1000.0
-                    err = self._line_err.get() if self._line_err is not None else 0.0
-                    self._lf_print(t_s, err)
+            elif self._st==S11:
+                if self._chk("\r\nTURN CANCEL\r\n"): yield self._st;continue
+                self._eu()
+                p=self._op();h=p[2] if p else 0.0
+                rem=(self._otrg-h)%360.0
+                n=ticks_ms()
+                if ticks_diff(n,self._lf_pt)>=100:
+                    self._lf_pt=n
+                    self._io.write("TURN h={:.1f} trg={:.1f} rem={:.1f}\r\n".format(h,self._otrg,rem))
+                if rem<2.0 or rem>358.0:
+                    self._ms();sleep_ms(300)
+                    nxt=self._otnxt
+                    self._io.write("TURN DONE h={:.1f}->S{}\r\n".format(h,nxt))
+                    if nxt==S12:
+                        self._arm.put(True);self._lfen.put(True)
+                        self._lgo.put(True);self._rgo.put(True)
+                    self._lf_pt=ticks_ms();self._st=nxt;yield self._st;continue
+                else:
+                    ef=min(20.0,max(10.0,rem*0.10))
+                    if self._ld: self._ld.enable();self._ld.set_effort(-ef)
+                    if self._rd: self._rd.enable();self._rd.set_effort(ef)
 
-                # No timeout here: obstacle course 'o' runs until bump or user cancel.
+            elif self._st==S12:
+                if self._chk("\r\nDRV CANCEL\r\n"): yield self._st;continue
+                if self._bump and self._bump.any():
+                    self._arm.put(False);self._ms()
+                    if self._ctrl and hasattr(self._ctrl,"set_odometry"):
+                        try:
+                            x,y,h,d=self._ctrl.get_odometry()
+                            self._ctrl.set_odometry(self._wx,y,180.0)
+                        except: pass
+                    self._io.write("BUMP->BACK\r\n")
+                    self._eu()
+                    self._bk0[0]=self._le.get_position() if self._le else 0
+                    self._bk0[1]=self._re.get_position() if self._re else 0
+                    sleep_ms(300);self._lf_pt=ticks_ms()
+                    self._st=S14;yield self._st;continue
+                n=ticks_ms()
+                if ticks_diff(n,self._lf_pt)>=100:
+                    self._lf_pt=n;self._olog("DRV")
 
-            # ---- S6: left motor test ----
-            elif self._state == S6_MOT_L:
+            elif self._st==S13:
+                if self._chk("\r\nSTRY CANCEL\r\n"): yield self._st;continue
+                self._drv(-float(ME));self._eu()
+                p=self._op();n=ticks_ms()
+                if ticks_diff(n,self._lf_pt)>=100:
+                    self._lf_pt=n;self._olog("STRY")
+                if p and p[1]<500.0:
+                    self._ms()
+                    self._otrg=180.0;self._oti0=p[2];self._otnxt=S12
+                    self._io.write("TURN h={:.1f} trg=180 Y={:.0f}\r\n".format(p[2],p[1]))
+                    sleep_ms(300);self._lf_pt=ticks_ms()
+                    self._st=S11;yield self._st;continue
+
+            elif self._st==S14:
+                if self._chk("\r\nBACK CANCEL\r\n"): yield self._st;continue
+                be=float(ME)
+                if self._ld: self._ld.enable();self._ld.set_effort(be)
+                if self._rd: self._rd.enable();self._rd.set_effort(be)
+                self._eu()
+                lp=self._le.get_position() if self._le else 0
+                rp=self._re.get_position() if self._re else 0
+                dist=(abs(lp-self._bk0[0])+abs(rp-self._bk0[1]))*MPC/2.0
+                n=ticks_ms()
+                if ticks_diff(n,self._lf_pt)>=100:
+                    self._lf_pt=n;self._io.write("BACK d={:.1f}\r\n".format(dist))
+                if dist>=50.0:
+                    self._ms();self._io.write("BACK DONE->SEEK\r\n")
+                    sleep_ms(200);self._lf_pt=ticks_ms()
+                    self._st=S15;yield self._st;continue
+
+            elif self._st==S15:
+                if self._chk("\r\nSEEK CANCEL\r\n"): yield self._st;continue
+                if self._ld: self._ld.enable();self._ld.set_effort(20.0)
+                if self._rd: self._rd.enable();self._rd.set_effort(-20.0)
+                self._eu()
+                err=self._sen.calculate_error() if self._sen else 0.0
+                n=ticks_ms()
+                if ticks_diff(n,self._lf_pt)>=100:
+                    self._lf_pt=n
+                    p=self._op();h=p[2] if p else 0.0
+                    self._io.write("SEEK h={:.1f} e={:.2f}\r\n".format(h,err))
+                if abs(err)>0.01:
+                    self._ms()
+                    rl=None
+                    if self._ctrl:
+                        try:
+                            x,y,h,d=self._ctrl.get_odometry()
+                            rl=(x,y,h)
+                        except: pass
+                    self._rlatch=rl;self._oblk=True
+                    self._io.write("LINE e={:.2f}->LF\r\n".format(err))
+                    sleep_ms(200)
+                    self._arm.put(True);self._lfen.put(True)
+                    self._lgo.put(True);self._rgo.put(True)
+                    self._lf_pt=ticks_ms();self._st=S9;yield self._st;continue
+
+            elif self._st==S5:
                 if self._io.any():
-                    self._io.read1()
-                    self._mot_test_done("LEFT motor")
-                    yield self._state
-                    continue
-
-                # Print both encoder positions at ~100 ms intervals
-                now_ms = ticks_ms()
-                if ticks_diff(now_ms, self._mot_print_ms) >= 100:
-                    self._mot_print_ms = now_ms
-                    elapsed = ticks_diff(now_ms, self._mot_start_ms)
-                    if self._leftEncoder is not None:
-                        self._leftEncoder.update()
-                    if self._rightEncoder is not None:
-                        self._rightEncoder.update()
-                    l_pos = self._leftEncoder.get_position()  if self._leftEncoder  is not None else 0
-                    r_pos = self._rightEncoder.get_position() if self._rightEncoder is not None else 0
-                    l_vel = self._leftEncoder.get_velocity()  if self._leftEncoder  is not None else 0
-                    r_vel = self._rightEncoder.get_velocity() if self._rightEncoder is not None else 0
-                    l_raw = self._leftEncoder.tim_pin.counter()  if self._leftEncoder  is not None else 0
-                    r_raw = self._rightEncoder.tim_pin.counter() if self._rightEncoder is not None else 0
-                    self._io.write("L=({},{:.0f},{}) R=({},{:.0f},{}) t={:.2f}s\r\n".format(
-                        l_pos, l_vel, l_raw, r_pos, r_vel, r_raw, elapsed / 1000.0))
-
-                if ticks_diff(ticks_ms(), self._mot_start_ms) >= MOT_TEST_MS:
-                    self._mot_test_done("LEFT motor")
-
-            # ---- S7: right motor test ----
-            elif self._state == S7_MOT_R:
-                if self._io.any():
-                    self._io.read1()
-                    self._mot_test_done("RIGHT motor")
-                    yield self._state
-                    continue
-
-                # Print both encoder positions at ~100 ms intervals
-                now_ms = ticks_ms()
-                if ticks_diff(now_ms, self._mot_print_ms) >= 100:
-                    self._mot_print_ms = now_ms
-                    elapsed = ticks_diff(now_ms, self._mot_start_ms)
-                    if self._leftEncoder is not None:
-                        self._leftEncoder.update()
-                    if self._rightEncoder is not None:
-                        self._rightEncoder.update()
-                    l_pos = self._leftEncoder.get_position()  if self._leftEncoder  is not None else 0
-                    r_pos = self._rightEncoder.get_position() if self._rightEncoder is not None else 0
-                    l_vel = self._leftEncoder.get_velocity()  if self._leftEncoder  is not None else 0
-                    r_vel = self._rightEncoder.get_velocity() if self._rightEncoder is not None else 0
-                    l_raw = self._leftEncoder.tim_pin.counter()  if self._leftEncoder  is not None else 0
-                    r_raw = self._rightEncoder.tim_pin.counter() if self._rightEncoder is not None else 0
-                    self._io.write("L=({},{:.0f},{}) R=({},{:.0f},{}) t={:.2f}s\r\n".format(
-                        l_pos, l_vel, l_raw, r_pos, r_vel, r_raw, elapsed / 1000.0))
-
-                if ticks_diff(ticks_ms(), self._mot_start_ms) >= MOT_TEST_MS:
-                    self._mot_test_done("RIGHT motor")
-
-            # ---- S8: straight-line trim test ----
-            elif self._state == S8_STRAIGHT:
-                if self._io.any():
-                    self._io.read1()
-                    self._mot_test_done("STRAIGHT")
-                    yield self._state
-                    continue
-
-                # Print both encoder positions at ~100 ms so you can see drift
-                now_ms = ticks_ms()
-                if ticks_diff(now_ms, self._mot_print_ms) >= 100:
-                    self._mot_print_ms = now_ms
-                    elapsed = ticks_diff(now_ms, self._mot_start_ms)
-                    l_pos = self._leftEncoder.get_position()  if self._leftEncoder  is not None else 0
-                    r_pos = self._rightEncoder.get_position() if self._rightEncoder is not None else 0
-                    self._io.write("t={:.2f}s  L={:.2f}in  R={:.2f}in  diff={:.2f}in\r\n".format(
-                        elapsed / 1000.0, l_pos, r_pos, l_pos - r_pos))
-
-                if ticks_diff(ticks_ms(), self._mot_start_ms) >= STRAIGHT_TEST_MS:
-                    self._mot_test_done("STRAIGHT")
-
-            # ---- S10: bumper test mode ----
-            elif self._state == S10_BUMPTEST:
-                # exit on 'x' / 'q'
-                if self._io.any():
-                    b = self._io.read1()
+                    b=self._io.read1()
                     if b:
-                        try:
-                            ch = b.decode()
-                        except Exception:
-                            ch = ""
-                        if ch in {"x", "X", "q", "Q"}:
-                            self._io.write("\r\nExit bump test.\r\n" + UI_prompt)
-                            self._state = S1_CMD
-                            yield self._state
-                            continue
+                        try: ch=b.decode()
+                        except: ch=""
+                        rd=self._sen.get_raw_readings()
+                        if ch in("w","W"):
+                            self._wa=int(sum(rd)/len(rd))
+                            self._io.write("WHITE={}\r\n".format(self._wa))
+                        elif ch in("b","B"):
+                            self._ba=int(max(rd))
+                            self._io.write("BLACK={}\r\n".format(self._ba))
+                        elif ch in("x","X","q","Q"):
+                            self._io.write("\r\nExit cal\r\n"+PR)
+                            self._st=S1;yield self._st;continue
+                        if self._wa is not None and self._ba is not None:
+                            self._io.write("w={} b={}\r\n".format(self._wa,self._ba))
+                n=ticks_ms()
+                if ticks_diff(n,self._cpt)>=CAL_MS:
+                    self._cpt=n
+                    rd=self._sen.get_raw_readings()
+                    self._io.write(",".join(str(int(r)) for r in rd)+"\r\n")
 
-                # If bump hardware is present, print whenever any bumper is pressed
-                if self._bump is not None and self._bump.any():
-                    left_hits, right_hits = self._bump.read_all()
-                    self._io.write("BUMP PRESSED  L={}  R={}\r\n".format(
-                        "".join("1" if b else "0" for b in left_hits),
-                        "".join("1" if b else "0" for b in right_hits),
-                    ))
-
-            # ---- S5: calibration mode ----
-            elif self._state == S5_CAL:
-
-                # check for keypress
-                if self._io.any():
-                    b = self._io.read1()
-                    if b:
-                        try:
-                            ch = b.decode()
-                        except Exception:
-                            ch = ""
-                        readings = self._sensor.get_raw_readings()
-                        if ch in {"w", "W"}:
-                            self._cal_capture_white(readings)
-                        elif ch in {"b", "B"}:
-                            self._cal_capture_black(readings)
-                        elif ch in {"x", "X", "q", "Q"}:
-                            self._io.write("\r\nExiting calibration.\r\n" + UI_prompt)
-                            self._state = S1_CMD
-                            yield self._state
-                            continue
-
-                # print live readings periodically
-                now = ticks_ms()
-                if ticks_diff(now, self._cal_print_ms) >= CAL_PRINT_MS:
-                    self._cal_print_ms = now
-                    readings = self._sensor.get_raw_readings()
-                    self._cal_print_live(readings)
-
-            yield self._state
+            yield self._st
