@@ -234,6 +234,9 @@ class task_control:
         self._odo_h = math.radians(float(heading_deg))
         self._odo_h_base = self._odo_h
         self._odo_dist = math.sqrt(self._odo_x ** 2 + self._odo_y ** 2)
+        self._enc_l_prev = self._enc.get_position()
+        if self._right_enc is not None:
+            self._enc_r_prev = self._right_enc.get_position()
         self._psi_hat_h0 = 0.0
         if self._psi_hat_share is not None:
             try:

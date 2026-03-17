@@ -59,7 +59,8 @@ class task_user:
         self._oset=False;self._fx=False;self._fy=True
         self._opas=False;self._otrg=0.0;self._oti0=0.0;self._otnxt=S12
         self._bk0=[0,0];self._wa=None;self._ba=None;self._cpt=0;self._lft=False
-        self._rlatch=None;self._oblk=False
+        self._rlatch=None;self._oblk=False;self._otl=False
+        self._s3y=500.0;self._s3t=180.0;self._s3n=S12;self._s3l=False
         self._io=_IO()
 
     def _dis(self):
@@ -190,7 +191,8 @@ class task_user:
                         p=self._op()
                         if p and p[1]<600.0:
                             self._dis();self._ms();self._opas=True
-                            self._otrg=90.0;self._oti0=p[2];self._otnxt=S13
+                            self._otrg=90.0;self._oti0=p[2];self._otnxt=S13;self._otl=False
+                            self._s3y=500.0;self._s3t=180.0;self._s3n=S12;self._s3l=False
                             self._io.write("TURN h={:.1f} trg=90 Y={:.0f}\r\n".format(p[2],p[1]))
                             sleep_ms(300);self._lf_pt=ticks_ms()
                             self._st=S11;yield self._st;continue
@@ -213,9 +215,14 @@ class task_user:
                             mid=(b_i+w_i)/2.0
                             if rd[i]<mid: allb=False;break
                         if allb:
-                            self._oblk=False
-                            self._cancel("\r\nALL BLACK STOP\r\n")
-                            yield self._st;continue
+                            self._oblk=False;self._dis();self._ms()
+                            if self._ctrl and hasattr(self._ctrl,"set_odometry"):
+                                try: self._ctrl.set_odometry(1175.0,1300.0,90.0)
+                                except: pass
+                            self._s3y=100.0;self._s3t=180.0;self._s3n=S9;self._s3l=False
+                            self._io.write("ALLBLK->STRY\r\n")
+                            sleep_ms(300);self._lf_pt=ticks_ms()
+                            self._st=S13;yield self._st;continue
                     except: pass
                 n=ticks_ms()
                 if ticks_diff(n,self._lf_pt)>=50:
@@ -230,7 +237,7 @@ class task_user:
                 if self._chk("\r\nTURN CANCEL\r\n"): yield self._st;continue
                 self._eu()
                 p=self._op();h=p[2] if p else 0.0
-                rem=(self._otrg-h)%360.0
+                rem=((h-self._otrg)%360.0) if self._otl else ((self._otrg-h)%360.0)
                 n=ticks_ms()
                 if ticks_diff(n,self._lf_pt)>=100:
                     self._lf_pt=n
@@ -239,14 +246,26 @@ class task_user:
                     self._ms();sleep_ms(300)
                     nxt=self._otnxt
                     self._io.write("TURN DONE h={:.1f}->S{}\r\n".format(h,nxt))
-                    if nxt==S12:
+                    if nxt==S12 or nxt==S9:
+                        if nxt==S9:
+                            rl=None
+                            if self._ctrl:
+                                try:
+                                    x,y,h2,d=self._ctrl.get_odometry()
+                                    rl=(x,y,h2)
+                                except: pass
+                            self._rlatch=rl
                         self._arm.put(True);self._lfen.put(True)
                         self._lgo.put(True);self._rgo.put(True)
                     self._lf_pt=ticks_ms();self._st=nxt;yield self._st;continue
                 else:
                     ef=min(20.0,max(10.0,rem*0.10))
-                    if self._ld: self._ld.enable();self._ld.set_effort(-ef)
-                    if self._rd: self._rd.enable();self._rd.set_effort(ef)
+                    if self._otl:
+                        if self._ld: self._ld.enable();self._ld.set_effort(ef)
+                        if self._rd: self._rd.enable();self._rd.set_effort(-ef)
+                    else:
+                        if self._ld: self._ld.enable();self._ld.set_effort(-ef)
+                        if self._rd: self._rd.enable();self._rd.set_effort(ef)
 
             elif self._st==S12:
                 if self._chk("\r\nDRV CANCEL\r\n"): yield self._st;continue
@@ -273,10 +292,10 @@ class task_user:
                 p=self._op();n=ticks_ms()
                 if ticks_diff(n,self._lf_pt)>=100:
                     self._lf_pt=n;self._olog("STRY")
-                if p and p[1]<500.0:
+                if p and p[1]<self._s3y:
                     self._ms()
-                    self._otrg=180.0;self._oti0=p[2];self._otnxt=S12
-                    self._io.write("TURN h={:.1f} trg=180 Y={:.0f}\r\n".format(p[2],p[1]))
+                    self._otrg=self._s3t;self._oti0=p[2];self._otnxt=self._s3n;self._otl=self._s3l
+                    self._io.write("TURN h={:.1f} trg={:.0f} Y={:.0f}\r\n".format(p[2],self._s3t,p[1]))
                     sleep_ms(300);self._lf_pt=ticks_ms()
                     self._st=S11;yield self._st;continue
 

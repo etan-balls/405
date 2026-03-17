@@ -94,9 +94,9 @@ i2c = pyb.I2C(1, pyb.I2C.CONTROLLER, baudrate=400000)
 # -----------------
 # Tuning parameters — edit these before flashing
 # -----------------
-BASE_EFFORT = 20.0   # raised — right motor needs >20% to overcome friction          20
-KP_LINE     = 6.0    # proportional gain on line error (raw value, no hidden scaling)
-KI_LINE     = .010    # integral gain on line error
+BASE_EFFORT = 25.0   # raised — right motor needs >20% to overcome friction          20
+KP_LINE     = 7.0    # proportional gain on line error (raw value, no hidden scaling)
+KI_LINE     = .050    # integral gain on line error
                      # start at 0, raise slowly (e.g. 0.001) if robot drifts on long straights
 MAX_EFFORT  = 90.0   # hard ceiling on any single wheel PWM %
                      # must be > BASE_EFFORT or steering has no headroom
@@ -107,7 +107,7 @@ RIGHT_OFFSET = 2.0   # additive PWM % added to right wheel to correct straight-l
 
 # IMU stabilization gains (set to 0.0 to disable each term)
 YAW_RATE_GAIN = .010   # damps oscillation using gyro Z (deg/s) — increase if robot wiggles
-HEADING_GAIN  = 0.35   # corrects heading drift using absolute Euler heading (deg)
+HEADING_GAIN  = 1    # corrects heading drift using absolute Euler heading (deg)
 CURVE_THRESH  = 20.0   # deg/s — yaw rate above this suppresses heading hold on curves
 
 
