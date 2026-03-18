@@ -1,6 +1,6 @@
 from motor_driver import motor_driver
 from encoder_driver import encoder
-from task_share import Share, Queue
+from task_share import Share
 from utime import ticks_us, ticks_diff
 import micropython
 
@@ -143,6 +143,7 @@ class task_control:
         self._psi_hat_h0 = 0.0   # observer psi_hat (rad) at last odometry reset
         self._enc_l_prev = 0  # previous left encoder count
         self._enc_r_prev = 0  # previous right encoder count
+        self._odo_psi_prev = None  # for unwrapping observer psi
         # reference to right encoder (must be set from main.py after construction)
         self._right_enc = None
 
@@ -178,10 +179,12 @@ class task_control:
         self._enc_l_prev = self._enc.get_position()
         if self._right_enc is not None:
             self._enc_r_prev = self._right_enc.get_position()
+        self._odo_psi_prev = None
 
     def _odo_update(self):
-        """Update dead-reckoning position from encoder counts, with IMU-fused heading."""
+        """Update dead-reckoning position from encoder counts + observer heading."""
         import math
+        _PI = 3.14159265359
         l_now = self._enc.get_position()
         r_now = self._right_enc.get_position() if self._right_enc is not None else self._enc_r_prev
 
@@ -192,22 +195,17 @@ class task_control:
 
         ds = (dl + dr) / 2.0
 
-        if self._psi_hat_share is not None:
-            try:
-                psi = self._psi_hat_share.get()
-                if psi is not None:
-                    self._odo_h = self._odo_h_base + (float(psi) - self._psi_hat_h0)
-            except Exception:
-                self._odo_h += (dl - dr) / self._WHEEL_TRACK_MM
-        elif self._odo_imu_h0 is not None and self._imu_heading_share is not None:
-            try:
-                h_now = self._imu_heading_share.get()
-                if h_now is not None:
-                    dh_deg = self._wrap_deg(float(h_now) - self._odo_imu_h0)
-                    self._odo_h = self._odo_h_base + math.radians(dh_deg)
-            except Exception:
-                self._odo_h += (dl - dr) / self._WHEEL_TRACK_MM
+        psi = self._psi_hat_share.get()
+        if psi is not None:
+            psi_f = float(psi)
+            psi_rel = psi_f - self._psi_hat_h0
+            if self._odo_psi_prev is not None:
+                d = ((psi_rel - self._odo_psi_prev + _PI) % (2.0 * _PI)) - _PI
+                psi_rel = self._odo_psi_prev + d
+            self._odo_psi_prev = psi_rel
+            self._odo_h = self._odo_h_base + psi_rel
         else:
+            self._odo_psi_prev = None
             self._odo_h += (dl - dr) / self._WHEEL_TRACK_MM
 
         self._odo_x += ds * math.cos(self._odo_h)
@@ -217,9 +215,11 @@ class task_control:
     def get_odometry(self):
         """Return (x_mm, y_mm, heading_deg, straight_line_dist_mm)."""
         import math
-        return (self._odo_x, self._odo_y,
-                math.degrees(self._odo_h),
-                self._odo_dist)
+        # Wrap heading to [0, 360) for any consumers (UI, logging). Internally we
+        # keep _odo_h unwrapped so integration remains smooth.
+        h_deg = math.degrees(self._odo_h)
+        h_deg = ((h_deg % 360.0) + 360.0) % 360.0
+        return (self._odo_x, self._odo_y, h_deg, self._odo_dist)
 
     def set_odometry(self, x_mm: float, y_mm: float, heading_deg: float) -> None:
         """
@@ -238,6 +238,7 @@ class task_control:
         if self._right_enc is not None:
             self._enc_r_prev = self._right_enc.get_position()
         self._psi_hat_h0 = 0.0
+        self._odo_psi_prev = None
         if self._psi_hat_share is not None:
             try:
                 p = self._psi_hat_share.get()

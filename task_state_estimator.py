@@ -109,6 +109,7 @@ class task_state_estimator:
         self._sL = 0.0
         self._sR = 0.0
         self._psi0 = None   # heading reference (first valid IMU reading)
+        self._h_deg_prev = None  # for unwrapping IMU heading
 
         self._state = S0_INIT
         print("State Estimator Task instantiated")
@@ -151,6 +152,7 @@ class task_state_estimator:
                 self._sL = 0.0
                 self._sR = 0.0
                 self._psi0 = None
+                self._h_deg_prev = None
                 self._state = S1_RUN
 
             elif self._state == S1_RUN:
@@ -171,6 +173,13 @@ class task_state_estimator:
                     h_deg  = 0.0
                 if gz_dps is None:
                     gz_dps = 0.0
+                h_deg = float(h_deg)
+
+                # Unwrap IMU heading to avoid 0/360 jumps
+                if self._h_deg_prev is not None:
+                    d = ((h_deg - self._h_deg_prev + 180.0) % 360.0) - 180.0
+                    h_deg = self._h_deg_prev + d
+                self._h_deg_prev = h_deg
 
                 # Latch heading reference on first valid reading
                 if self._psi0 is None:

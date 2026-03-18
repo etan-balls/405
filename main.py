@@ -5,9 +5,9 @@ from gc import collect, mem_free
 collect()
 from task_share import Share
 collect()
-from cotask import Task, task_list
-collect()
 from task_user import task_user
+collect()
+from cotask import Task, task_list
 collect()
 from motor_driver import motor_driver
 collect()
@@ -35,7 +35,7 @@ print("RAM free after imports:", mem_free())
 # -----------------
 # Bluetooth UART1 setup (HC-05 on PB6=TX, PB7=RX)
 # -----------------
-bt = UART(1, baudrate=9600, timeout=10)  # change to 115200 if bt_config.py was run
+bt = UART(1, baudrate=115200, timeout=10)  # change to 115200 if bt_config.py was run
 
 # Redirect the MicroPython REPL (and therefore all print/input) to UART3.
 # PuTTY connects to the HC-05 COM port at 115200 to see all output.
@@ -65,6 +65,7 @@ rightEncoder = encoder(2, pyb.Pin.cpu.A0, pyb.Pin.cpu.A1)
 left_bump_pins  = [Pin.cpu.B12, Pin.cpu.B11, Pin.cpu.C7]
 right_bump_pins = [Pin.cpu.A15, Pin.cpu.H0,  Pin.cpu.H1]
 bump_sensors = BumpSensors(left_pins=left_bump_pins, right_pins=right_bump_pins)
+user_btn = Pin(Pin.cpu.C13, Pin.IN)
 
 pins = [
     # Leftmost two sensors (C0, C1) disabled; we only use 7 sensors:
@@ -75,8 +76,7 @@ pins = [
 sensor_fun = multiple_ir_readings(*pins)
 
 # ADC calibration — per-sensor black/white arrays (left -> right).
-# Updated black values from your latest measurements.
-black_adc = [1627, 1566, 1500, 1046, 1114, 1294, 852]
+black_adc = [1420, 1372, 1187, 891, 919, 1213, 569]
 white_adc = [256, 268, 260, 243, 247, 256, 235]
 line = L_sensor(
     sensor_fun,
@@ -94,21 +94,21 @@ i2c = pyb.I2C(1, pyb.I2C.CONTROLLER, baudrate=400000)
 # -----------------
 # Tuning parameters — edit these before flashing
 # -----------------
-BASE_EFFORT = 25.0   # raised — right motor needs >20% to overcome friction          20
-KP_LINE     = 7.0    # proportional gain on line error (raw value, no hidden scaling)
-KI_LINE     = .050    # integral gain on line error
+BASE_EFFORT = 25.0   # raised — CCright motor needs >20% to overcome friction          20
+KP_LINE     = 8.5   # proportional gain on line error (raw value, no hidden scaling)
+KI_LINE     = 2    # integral gain on line error
                      # start at 0, raise slowly (e.g. 0.001) if robot drifts on long straights
-MAX_EFFORT  = 90.0   # hard ceiling on any single wheel PWM %
+MAX_EFFORT  = 100.0   # hard ceiling on any single wheel PWM %
                      # must be > BASE_EFFORT or steering has no headroom
-RIGHT_OFFSET = 2.0   # additive PWM % added to right wheel to correct straight-line drift   2
+RIGHT_OFFSET = 0.0   # additive PWM % added to right wheel to correct straight-line drift   2
                      # if robot veers LEFT  -> increase (try 2, 3, 4...)
                      # if robot veers RIGHT -> decrease or go negative
                      # tune with 's' key until encoder diff stays near 0
 
 # IMU stabilization gains (set to 0.0 to disable each term)
-YAW_RATE_GAIN = .010   # damps oscillation using gyro Z (deg/s) — increase if robot wiggles
-HEADING_GAIN  = 1    # corrects heading drift using absolute Euler heading (deg)
-CURVE_THRESH  = 20.0   # deg/s — yaw rate above this suppresses heading hold on curves
+YAW_RATE_GAIN = .030   # damps oscillation using gyro Z (deg/s) — increase if robot wiggles
+HEADING_GAIN  = 0    # corrects heading drift using absolute Euler heading (deg)
+CURVE_THRESH  = 0.0   # deg/s — yaw rate above this suppresses heading hold on curves
 
 
 # -----------------
@@ -221,6 +221,7 @@ user_obj = task_user(
     omL_hat_share=omL_hat,
     omR_hat_share=omR_hat,
     bump_sensors=bump_sensors,
+    user_btn=user_btn,
 )
 
 
@@ -233,7 +234,7 @@ task_list.append(Task(ctrl_obj.run,     name="Ctrl",   priority=4, period=20))
 task_list.append(Task(motL_obj.run,     name="MotL",   priority=3, period=20))
 task_list.append(Task(motR_obj.run,     name="MotR",   priority=3, period=20))
 task_list.append(Task(est_obj.run,      name="Est",    priority=2, period=20))  # matrices designed for Ts=20ms
-task_list.append(Task(user_obj.run,     name="User",   priority=1, period=50))
+task_list.append(Task(user_obj.run,     name="User",   priority=1, period=20))
 
 collect()
 print("Starting scheduler...")
