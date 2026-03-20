@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>task_state_estimator &#8212; 405 Project 1.0 documentation</title>
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="../_static/basic.css?v=b08954a9" />
+    <link rel="stylesheet" type="text/css" href="../_static/alabaster.css?v=27fed22d" />
+    <script src="../_static/documentation_options.js?v=f2a433a1"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+   
+  <link rel="stylesheet" href="../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <h1>Source code for task_state_estimator</h1><div class="highlight"><pre>
+<span></span><span class="c1"># task_state_estimator.py</span>
+<span class="c1"># Discretized Luenberger state observer for Romi.</span>
+<span class="c1">#</span>
+<span class="c1"># State:    x = [s (m), psi (rad), OmL (rad/s), OmR (rad/s)]</span>
+<span class="c1"># Ext input: u* = [uL_V, uR_V, sL_meas, sR_meas, psi_meas, psidot_meas]  (len 6)</span>
+<span class="c1"># Note: motor inputs are in VOLTS. Convert %PWM using _K_PWM before passing.</span>
+<span class="c1">#</span>
+<span class="c1"># Observer update (runs every Ts = 20 ms):</span>
+<span class="c1">#   x_hat_{k+1} = AD @ x_hat_k + BD @ u*_k</span>
+<span class="c1">#</span>
+<span class="c1"># ------------------------------------------------------------------ #</span>
+<span class="c1"># HOW TO GET AD AND BD:</span>
+<span class="c1">#   1. Run compute_observer.py on your PC (requires numpy + scipy).</span>
+<span class="c1">#   2. Copy-paste the printed AD and BD lists below.</span>
+<span class="c1"># ------------------------------------------------------------------ #</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">micropython</span>
+
+<span class="k">try</span><span class="p">:</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">ulab</span><span class="w"> </span><span class="kn">import</span> <span class="n">numpy</span> <span class="k">as</span> <span class="n">np</span>
+    <span class="n">_HAVE_ULAB</span> <span class="o">=</span> <span class="kc">True</span>
+<span class="k">except</span> <span class="ne">ImportError</span><span class="p">:</span>
+    <span class="n">_HAVE_ULAB</span> <span class="o">=</span> <span class="kc">False</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">math</span>
+
+<span class="c1"># ------------------------------------------------------------------ #</span>
+<span class="c1"># Physical constants (must match compute_observer.py)</span>
+<span class="c1"># ------------------------------------------------------------------ #</span>
+<span class="n">_M_PER_COUNT</span>  <span class="o">=</span> <span class="mf">0.00015303</span>   <span class="c1"># metres per encoder count  (2*pi*35mm / 1437.07 / 1000)</span>
+<span class="n">_RAD_PER_DEG</span>  <span class="o">=</span> <span class="n">math</span><span class="o">.</span><span class="n">pi</span> <span class="o">/</span> <span class="mf">180.0</span>
+<span class="n">_K_PWM</span>        <span class="o">=</span> <span class="mf">0.974</span> <span class="o">/</span> <span class="mf">30.0</span>  <span class="c1"># V per %PWM  (tune if needed)</span>
+
+<span class="c1"># ------------------------------------------------------------------ #</span>
+<span class="c1"># Discretized observer matrices — paste output of compute_observer.py</span>
+<span class="c1"># AD and BD are defined inside __init__ as locals so they are freed</span>
+<span class="c1"># after being converted to ulab arrays, saving ~500 bytes of heap.</span>
+
+<span class="c1"># ------------------------------------------------------------------ #</span>
+<span class="c1"># Task states</span>
+<span class="c1"># ------------------------------------------------------------------ #</span>
+<span class="n">S0_INIT</span> <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">S1_RUN</span>  <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="task_state_estimator">
+<a class="viewcode-back" href="../task_state_estimator.html#task_state_estimator.task_state_estimator">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">task_state_estimator</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Cooperative task that runs the discretized Luenberger observer.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    left_enc  : encoder object  (has get_position(), get_velocity())</span>
+<span class="sd">    right_enc : encoder object</span>
+<span class="sd">    imu_heading_share   : Share(&#39;f&#39;)  heading in DEGREES from BNO055</span>
+<span class="sd">    imu_yawrate_share   : Share(&#39;f&#39;)  yaw-rate in DEG/S from BNO055</span>
+<span class="sd">    effort_L_share      : Share(&#39;f&#39;)  current left  motor effort (%PWM)</span>
+<span class="sd">    effort_R_share      : Share(&#39;f&#39;)  current right motor effort (%PWM)</span>
+<span class="sd">    psi_hat_share       : Share(&#39;f&#39;)  OUT – estimated heading (rad)</span>
+<span class="sd">    s_hat_share         : Share(&#39;f&#39;)  OUT – estimated arc-length (m)</span>
+<span class="sd">    omL_hat_share       : Share(&#39;f&#39;)  OUT – estimated left  wheel speed (rad/s)</span>
+<span class="sd">    omR_hat_share       : Share(&#39;f&#39;)  OUT – estimated right wheel speed (rad/s)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span>
+                 <span class="n">left_enc</span><span class="p">,</span> <span class="n">right_enc</span><span class="p">,</span>
+                 <span class="n">imu_heading_share</span><span class="p">,</span> <span class="n">imu_yawrate_share</span><span class="p">,</span>
+                 <span class="n">effort_L_share</span><span class="p">,</span> <span class="n">effort_R_share</span><span class="p">,</span>
+                 <span class="n">psi_hat_share</span><span class="p">,</span> <span class="n">s_hat_share</span><span class="p">,</span>
+                 <span class="n">omL_hat_share</span><span class="p">,</span> <span class="n">omR_hat_share</span><span class="p">):</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_left</span>  <span class="o">=</span> <span class="n">left_enc</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_right</span> <span class="o">=</span> <span class="n">right_enc</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_imu_h</span>  <span class="o">=</span> <span class="n">imu_heading_share</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_imu_gz</span> <span class="o">=</span> <span class="n">imu_yawrate_share</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_uL</span>     <span class="o">=</span> <span class="n">effort_L_share</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_uR</span>     <span class="o">=</span> <span class="n">effort_R_share</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_psi_out</span> <span class="o">=</span> <span class="n">psi_hat_share</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_s_out</span>   <span class="o">=</span> <span class="n">s_hat_share</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_omL_out</span> <span class="o">=</span> <span class="n">omL_hat_share</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_omR_out</span> <span class="o">=</span> <span class="n">omR_hat_share</span>
+
+        <span class="c1"># Build ulab matrices once. Data defined as locals so the lists</span>
+        <span class="c1"># are freed after conversion (module-level lists stay in heap forever).</span>
+        <span class="n">_ad</span> <span class="o">=</span> <span class="p">[</span>
+            <span class="p">[</span> <span class="mf">0.75363828</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.0</span><span class="p">,</span>         <span class="mf">0.00024891</span><span class="p">,</span>  <span class="mf">0.00024891</span><span class="p">],</span>
+            <span class="p">[</span><span class="o">-</span><span class="mf">0.0</span><span class="p">,</span>         <span class="mf">0.81782232</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.00285708</span><span class="p">,</span>  <span class="mf">0.00285708</span><span class="p">],</span>
+            <span class="p">[</span><span class="o">-</span><span class="mf">0.0001031</span><span class="p">,</span>   <span class="mf">0.00060186</span><span class="p">,</span>  <span class="mf">0.56539207</span><span class="p">,</span>  <span class="mf">0.10492794</span><span class="p">],</span>
+            <span class="p">[</span><span class="o">-</span><span class="mf">0.0001031</span><span class="p">,</span>  <span class="o">-</span><span class="mf">0.00060186</span><span class="p">,</span>  <span class="mf">0.10492794</span><span class="p">,</span>  <span class="mf">0.56539207</span><span class="p">],</span>
+        <span class="p">]</span>
+        <span class="n">_bd</span> <span class="o">=</span> <span class="p">[</span>
+            <span class="p">[</span> <span class="mf">0.00019526</span><span class="p">,</span>  <span class="mf">0.00019526</span><span class="p">,</span>  <span class="mf">0.12318086</span><span class="p">,</span>  <span class="mf">0.12318086</span><span class="p">,</span>  <span class="mf">0.0</span><span class="p">,</span>        <span class="mf">0.0</span>       <span class="p">],</span>
+            <span class="p">[</span><span class="o">-</span><span class="mf">0.00234551</span><span class="p">,</span>  <span class="mf">0.00234551</span><span class="p">,</span> <span class="o">-</span><span class="mf">0.01342323</span><span class="p">,</span>  <span class="mf">0.01342323</span><span class="p">,</span>  <span class="mf">0.18017762</span><span class="p">,</span> <span class="mf">0.00309313</span><span class="p">],</span>
+            <span class="p">[</span> <span class="mf">1.06089633</span><span class="p">,</span>  <span class="mf">0.08968669</span><span class="p">,</span>  <span class="mf">9.59e-05</span><span class="p">,</span>    <span class="mf">7.2e-06</span><span class="p">,</span>    <span class="o">-</span><span class="mf">0.00059525</span><span class="p">,</span><span class="o">-</span><span class="mf">0.55608711</span><span class="p">],</span>
+            <span class="p">[</span> <span class="mf">0.08968669</span><span class="p">,</span>  <span class="mf">1.06089633</span><span class="p">,</span>  <span class="mf">7.2e-06</span><span class="p">,</span>     <span class="mf">9.59e-05</span><span class="p">,</span>    <span class="mf">0.00059525</span><span class="p">,</span> <span class="mf">0.55608711</span><span class="p">],</span>
+        <span class="p">]</span>
+        <span class="k">if</span> <span class="n">_HAVE_ULAB</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_AD</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">_ad</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_BD</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">_bd</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_xh</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">])</span>  <span class="c1"># 1D vector (ulab has no @ operator)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="c1"># Fallback: pure-Python lists (slow; replace with real ulab ASAP)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_AD</span> <span class="o">=</span> <span class="n">_ad</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_BD</span> <span class="o">=</span> <span class="n">_bd</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_xh</span> <span class="o">=</span> <span class="p">[</span><span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">]</span>
+
+        <span class="c1"># Track cumulative distance for sL / sR measurements</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_sL</span> <span class="o">=</span> <span class="mf">0.0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_sR</span> <span class="o">=</span> <span class="mf">0.0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_psi0</span> <span class="o">=</span> <span class="kc">None</span>   <span class="c1"># heading reference (first valid IMU reading)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S0_INIT</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;State Estimator Task instantiated&quot;</span><span class="p">)</span>
+
+    <span class="c1"># -------------------------------------------------------------- #</span>
+    <span class="c1"># Internal helpers</span>
+    <span class="c1"># -------------------------------------------------------------- #</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_mat_vec_add</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">A</span><span class="p">,</span> <span class="n">B</span><span class="p">,</span> <span class="n">x</span><span class="p">,</span> <span class="n">u</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Compute A @ x + B @ u for plain-Python list fallback (4-state, 6-input).&quot;&quot;&quot;</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="p">[</span><span class="mf">0.0</span><span class="p">]</span> <span class="o">*</span> <span class="mi">4</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">):</span>
+            <span class="n">s</span> <span class="o">=</span> <span class="mf">0.0</span>
+            <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">):</span>
+                <span class="n">s</span> <span class="o">+=</span> <span class="n">A</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="n">j</span><span class="p">]</span> <span class="o">*</span> <span class="n">x</span><span class="p">[</span><span class="n">j</span><span class="p">]</span>
+            <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">6</span><span class="p">):</span>
+                <span class="n">s</span> <span class="o">+=</span> <span class="n">B</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="n">j</span><span class="p">]</span> <span class="o">*</span> <span class="n">u</span><span class="p">[</span><span class="n">j</span><span class="p">]</span>
+            <span class="n">result</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">s</span>
+        <span class="k">return</span> <span class="n">result</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_update_ulab</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">u_star</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;One observer step using ulab (fast path). Uses np.dot() — ulab has no @ operator.&quot;&quot;&quot;</span>
+        <span class="n">u_vec</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">u_star</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_xh</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_AD</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_xh</span><span class="p">)</span> <span class="o">+</span> <span class="n">np</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_BD</span><span class="p">,</span> <span class="n">u_vec</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_update_python</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">u_star</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;One observer step using pure-Python lists (slow fallback).&quot;&quot;&quot;</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_xh</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mat_vec_add</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_AD</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_BD</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_xh</span><span class="p">,</span> <span class="n">u_star</span><span class="p">)</span>
+
+    <span class="c1"># -------------------------------------------------------------- #</span>
+    <span class="c1"># Task generator</span>
+    <span class="c1"># -------------------------------------------------------------- #</span>
+
+<div class="viewcode-block" id="task_state_estimator.run">
+<a class="viewcode-back" href="../task_state_estimator.html#task_state_estimator.task_state_estimator.run">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">S0_INIT</span><span class="p">:</span>
+                <span class="c1"># Zero encoders so cumulative distances start at 0</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_left</span><span class="o">.</span><span class="n">zero</span><span class="p">()</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_right</span><span class="o">.</span><span class="n">zero</span><span class="p">()</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_sL</span> <span class="o">=</span> <span class="mf">0.0</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_sR</span> <span class="o">=</span> <span class="mf">0.0</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_psi0</span> <span class="o">=</span> <span class="kc">None</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S1_RUN</span>
+
+            <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">S1_RUN</span><span class="p">:</span>
+                <span class="c1"># -- 1. Update encoders (they must also be updated by whoever</span>
+                <span class="c1">#       calls update() in the main loop; this read is safe</span>
+                <span class="c1">#       because we only call get_* here).</span>
+                <span class="c1"># Both encoders count negative going forward; negate so the</span>
+                <span class="c1"># observer receives sL, sR positive going forward (matching the</span>
+                <span class="c1"># model: sL = s - (w/2)*psi, sR = s + (w/2)*psi, both positive).</span>
+                <span class="n">sL_m</span> <span class="o">=</span> <span class="o">-</span><span class="bp">self</span><span class="o">.</span><span class="n">_left</span><span class="o">.</span><span class="n">get_position</span><span class="p">()</span>  <span class="o">*</span> <span class="n">_M_PER_COUNT</span>
+                <span class="n">sR_m</span> <span class="o">=</span> <span class="o">-</span><span class="bp">self</span><span class="o">.</span><span class="n">_right</span><span class="o">.</span><span class="n">get_position</span><span class="p">()</span> <span class="o">*</span> <span class="n">_M_PER_COUNT</span>
+
+                <span class="c1"># -- 2. IMU measurements (degrees → radians)</span>
+                <span class="n">h_deg</span>  <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_imu_h</span><span class="o">.</span><span class="n">get</span><span class="p">()</span>
+                <span class="n">gz_dps</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_imu_gz</span><span class="o">.</span><span class="n">get</span><span class="p">()</span>
+
+                <span class="k">if</span> <span class="n">h_deg</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="n">h_deg</span>  <span class="o">=</span> <span class="mf">0.0</span>
+                <span class="k">if</span> <span class="n">gz_dps</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="n">gz_dps</span> <span class="o">=</span> <span class="mf">0.0</span>
+
+                <span class="c1"># Latch heading reference on first valid reading</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_psi0</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_psi0</span> <span class="o">=</span> <span class="n">h_deg</span>
+
+                <span class="n">psi_meas</span>     <span class="o">=</span> <span class="p">(</span><span class="n">h_deg</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">_psi0</span><span class="p">)</span> <span class="o">*</span> <span class="n">_RAD_PER_DEG</span>
+                <span class="n">psidot_meas</span>  <span class="o">=</span> <span class="n">gz_dps</span> <span class="o">*</span> <span class="n">_RAD_PER_DEG</span>
+
+                <span class="c1"># -- 3. Motor efforts (%PWM) → convert to volts for observer</span>
+                <span class="n">uL</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_uL</span><span class="o">.</span><span class="n">get</span><span class="p">()</span>
+                <span class="n">uR</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_uR</span><span class="o">.</span><span class="n">get</span><span class="p">()</span>
+                <span class="k">if</span> <span class="n">uL</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span> <span class="n">uL</span> <span class="o">=</span> <span class="mf">0.0</span>
+                <span class="k">if</span> <span class="n">uR</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span> <span class="n">uR</span> <span class="o">=</span> <span class="mf">0.0</span>
+                <span class="n">uL_V</span> <span class="o">=</span> <span class="n">uL</span> <span class="o">*</span> <span class="n">_K_PWM</span>
+                <span class="n">uR_V</span> <span class="o">=</span> <span class="n">uR</span> <span class="o">*</span> <span class="n">_K_PWM</span>
+
+                <span class="c1"># -- 4. Extended input vector</span>
+                <span class="n">u_star</span> <span class="o">=</span> <span class="p">[</span><span class="n">uL_V</span><span class="p">,</span> <span class="n">uR_V</span><span class="p">,</span> <span class="n">sL_m</span><span class="p">,</span> <span class="n">sR_m</span><span class="p">,</span> <span class="n">psi_meas</span><span class="p">,</span> <span class="n">psidot_meas</span><span class="p">]</span>
+
+                <span class="c1"># -- 5. Observer step</span>
+                <span class="k">if</span> <span class="n">_HAVE_ULAB</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_update_ulab</span><span class="p">(</span><span class="n">u_star</span><span class="p">)</span>
+                    <span class="n">s_h</span>   <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_xh</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+                    <span class="n">psi_h</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_xh</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span>
+                    <span class="n">omL_h</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_xh</span><span class="p">[</span><span class="mi">2</span><span class="p">])</span>
+                    <span class="n">omR_h</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_xh</span><span class="p">[</span><span class="mi">3</span><span class="p">])</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_update_python</span><span class="p">(</span><span class="n">u_star</span><span class="p">)</span>
+                    <span class="n">s_h</span><span class="p">,</span> <span class="n">psi_h</span><span class="p">,</span> <span class="n">omL_h</span><span class="p">,</span> <span class="n">omR_h</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_xh</span>
+
+                <span class="c1"># -- 6. Publish estimates</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_psi_out</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">psi_h</span><span class="p">)</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_s_out</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">s_h</span><span class="p">)</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_omL_out</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">omL_h</span><span class="p">)</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_omR_out</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">omR_h</span><span class="p">)</span>
+
+            <span class="k">yield</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span></div>
+</div>
+
+</pre></div>
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../index.html">405 Project</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../modules.html">405</a></li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../index.html">Documentation overview</a><ul>
+  <li><a href="index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;2026, Fredy Herrarte and Ethan Liu.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 9.1.0</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>

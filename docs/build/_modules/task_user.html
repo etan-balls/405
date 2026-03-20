@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>task_user &#8212; 405 Project 1.0 documentation</title>
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="../_static/basic.css?v=b08954a9" />
+    <link rel="stylesheet" type="text/css" href="../_static/alabaster.css?v=27fed22d" />
+    <script src="../_static/documentation_options.js?v=f2a433a1"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+   
+  <link rel="stylesheet" href="../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <h1>Source code for task_user</h1><div class="highlight"><pre>
+<span></span><span class="c1"># task_user.py - f=line follow (10s), x=cancel, c=calibrate, l/r=motor test (2s)</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">uselect</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">micropython</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">utime</span><span class="w"> </span><span class="kn">import</span> <span class="n">ticks_ms</span><span class="p">,</span> <span class="n">ticks_diff</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">task_share</span><span class="w"> </span><span class="kn">import</span> <span class="n">Share</span>
+
+<span class="n">S0_INIT</span>    <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">S1_CMD</span>     <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">S4_LF</span>      <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">4</span><span class="p">)</span>
+<span class="n">S5_CAL</span>     <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">5</span><span class="p">)</span>   <span class="c1"># calibration mode</span>
+<span class="n">S6_MOT_L</span>   <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">6</span><span class="p">)</span>   <span class="c1"># left motor test (2 s)</span>
+<span class="n">S7_MOT_R</span>   <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">7</span><span class="p">)</span>   <span class="c1"># right motor test (2 s)</span>
+<span class="n">S8_STRAIGHT</span>  <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">8</span><span class="p">)</span>  <span class="c1"># straight-line trim test (3 s)</span>
+
+<span class="n">LF_DURATION_MS</span>      <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">10_000</span><span class="p">)</span>  <span class="c1"># 10 seconds</span>
+<span class="n">MOT_TEST_MS</span>         <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">2_000</span><span class="p">)</span>   <span class="c1"># 2 seconds</span>
+<span class="n">STRAIGHT_TEST_MS</span>    <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">3_000</span><span class="p">)</span>   <span class="c1"># 3 seconds</span>
+<span class="n">MOT_TEST_EFFORT</span>     <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">30</span><span class="p">)</span>      <span class="c1"># PWM % for motor test</span>
+<span class="n">CAL_PRINT_MS</span>        <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">200</span><span class="p">)</span>     <span class="c1"># print interval during cal</span>
+<span class="n">MM_PER_COUNT</span>        <span class="o">=</span> <span class="mf">0.15303</span>                    <span class="c1"># wheel radius 35mm, 1437.07 CPR</span>
+
+<span class="n">UI_prompt</span> <span class="o">=</span> <span class="s2">&quot;&gt;: &quot;</span>
+<span class="n">N_SENSORS</span> <span class="o">=</span> <span class="mi">9</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_IO</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_poll</span> <span class="o">=</span> <span class="n">uselect</span><span class="o">.</span><span class="n">poll</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_poll</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">stdin</span><span class="p">,</span> <span class="n">uselect</span><span class="o">.</span><span class="n">POLLIN</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">any</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="k">return</span> <span class="mi">1</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_poll</span><span class="o">.</span><span class="n">poll</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="k">else</span> <span class="mi">0</span>
+        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+            <span class="k">return</span> <span class="mi">0</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">read1</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">any</span><span class="p">():</span>
+            <span class="k">return</span> <span class="kc">None</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">ch</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">read</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">ch</span><span class="p">:</span>
+                <span class="k">return</span> <span class="kc">None</span>
+            <span class="k">return</span> <span class="n">ch</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">ch</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="k">else</span> <span class="n">ch</span>
+        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">None</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">write</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">s</span><span class="p">):</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+            <span class="k">pass</span>
+
+
+<div class="viewcode-block" id="task_user">
+<a class="viewcode-back" href="../task_user.html#task_user.task_user">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">task_user</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span>
+                 <span class="n">leftMotorGo</span><span class="p">:</span> <span class="n">Share</span><span class="p">,</span> <span class="n">rightMotorGo</span><span class="p">:</span> <span class="n">Share</span><span class="p">,</span>
+                 <span class="n">lineFollowEnable</span><span class="p">:</span> <span class="n">Share</span><span class="p">,</span>
+                 <span class="n">armEnable</span><span class="p">:</span> <span class="n">Share</span><span class="p">,</span>
+                 <span class="n">lineSensor</span><span class="p">,</span>
+                 <span class="n">lineError</span><span class="p">:</span> <span class="n">Share</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+                 <span class="n">leftEffortCmd</span><span class="p">:</span> <span class="n">Share</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>    <span class="c1"># needed for motor test</span>
+                 <span class="n">rightEffortCmd</span><span class="p">:</span> <span class="n">Share</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>   <span class="c1"># needed for motor test</span>
+                 <span class="n">leftEncoder</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>               <span class="c1"># encoder for position printing</span>
+                 <span class="n">rightEncoder</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>              <span class="c1"># encoder for position printing</span>
+                 <span class="n">leftMotorDriver</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>           <span class="c1"># motor driver object for direct test control</span>
+                 <span class="n">rightMotorDriver</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>          <span class="c1"># motor driver object for direct test control</span>
+                 <span class="n">imu_heading</span><span class="p">:</span> <span class="n">Share</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>      <span class="c1"># BNO055 Euler heading (deg)</span>
+                 <span class="n">imu_yawrate</span><span class="p">:</span> <span class="n">Share</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>      <span class="c1"># BNO055 gyro Z (deg/s)</span>
+                 <span class="n">imu_calib</span><span class="p">:</span> <span class="n">Share</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>        <span class="c1"># packed calibration status byte</span>
+                 <span class="n">right_offset</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">,</span>     <span class="c1"># additive right-wheel trim for straight test</span>
+                 <span class="n">ctrl</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>                     <span class="c1"># control task object for odometry readout</span>
+                 <span class="n">s_hat_share</span><span class="p">:</span> <span class="n">Share</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>      <span class="c1"># state estimator arc-length (m)</span>
+                 <span class="n">psi_hat_share</span><span class="p">:</span> <span class="n">Share</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>   <span class="c1"># state estimator heading (rad)</span>
+                 <span class="n">omL_hat_share</span><span class="p">:</span> <span class="n">Share</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>   <span class="c1"># state estimator left wheel speed (rad/s)</span>
+                 <span class="n">omR_hat_share</span><span class="p">:</span> <span class="n">Share</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>  <span class="c1"># state estimator right wheel speed (rad/s)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_state</span>        <span class="o">=</span> <span class="n">S0_INIT</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorGo</span>  <span class="o">=</span> <span class="n">leftMotorGo</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorGo</span> <span class="o">=</span> <span class="n">rightMotorGo</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_en</span>        <span class="o">=</span> <span class="n">lineFollowEnable</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_arm</span>          <span class="o">=</span> <span class="n">armEnable</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_sensor</span>       <span class="o">=</span> <span class="n">lineSensor</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_line_err</span>     <span class="o">=</span> <span class="n">lineError</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_start_ms</span>   <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_print_ms</span>   <span class="o">=</span> <span class="mi">0</span>      <span class="c1"># throttle print rate during LF</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_enc_l0</span>     <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_enc_r0</span>     <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_s_hat0</span>     <span class="o">=</span> <span class="mf">0.0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_s_hat_init</span> <span class="o">=</span> <span class="kc">False</span>  <span class="c1"># latch s_hat on first display tick</span>
+
+        <span class="c1"># motor test effort shares (optional but recommended)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_leftEffortCmd</span>  <span class="o">=</span> <span class="n">leftEffortCmd</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_rightEffortCmd</span> <span class="o">=</span> <span class="n">rightEffortCmd</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span>    <span class="o">=</span> <span class="n">leftEncoder</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span>   <span class="o">=</span> <span class="n">rightEncoder</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorDrv</span>   <span class="o">=</span> <span class="n">leftMotorDriver</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorDrv</span>  <span class="o">=</span> <span class="n">rightMotorDriver</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mot_start_ms</span>   <span class="o">=</span> <span class="mi">0</span>    <span class="c1"># timer for motor test states</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mot_print_ms</span>   <span class="o">=</span> <span class="mi">0</span>    <span class="c1"># throttle position print rate</span>
+
+        <span class="c1"># IMU shares (optional)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_imu_heading</span>  <span class="o">=</span> <span class="n">imu_heading</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_imu_yawrate</span>  <span class="o">=</span> <span class="n">imu_yawrate</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_imu_calib</span>    <span class="o">=</span> <span class="n">imu_calib</span>
+
+        <span class="c1"># right wheel offset for straight test</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_right_offset</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">right_offset</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ctrl</span> <span class="o">=</span> <span class="n">ctrl</span>
+
+        <span class="c1"># state estimator shares (optional)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_s_hat</span>      <span class="o">=</span> <span class="n">s_hat_share</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_psi_hat</span>    <span class="o">=</span> <span class="n">psi_hat_share</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_omL_hat</span>    <span class="o">=</span> <span class="n">omL_hat_share</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_omR_hat</span>    <span class="o">=</span> <span class="n">omR_hat_share</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_psi_hat0</span> <span class="o">=</span> <span class="mf">0.0</span>
+
+        <span class="c1"># calibration state</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_white_adc</span>    <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_black_adc</span>    <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_cal_print_ms</span> <span class="o">=</span> <span class="mi">0</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span> <span class="o">=</span> <span class="n">_IO</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;User Task instantiated</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="c1"># ------------------------------------------------------------------</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_disarm</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_arm</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_en</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorGo</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorGo</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEffortCmd</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_leftEffortCmd</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="mf">0.0</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEffortCmd</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_rightEffortCmd</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="mf">0.0</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_print_odometry</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ctrl</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span>
+        <span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">hdeg</span><span class="p">,</span> <span class="n">dist</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ctrl</span><span class="o">.</span><span class="n">get_odometry</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;--- Position from start ---</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;  X=</span><span class="si">{:.1f}</span><span class="s2">mm  Y=</span><span class="si">{:.1f}</span><span class="s2">mm  Heading=</span><span class="si">{:.1f}</span><span class="s2">deg</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">hdeg</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;  Straight-line dist=</span><span class="si">{:.1f}</span><span class="s2">mm</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">dist</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_lf_begin</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_arm</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_en</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorGo</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorGo</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">True</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_start_ms</span> <span class="o">=</span> <span class="n">ticks_ms</span><span class="p">()</span>
+        <span class="c1"># Zero encoders now so display distances always start at 0.</span>
+        <span class="c1"># The control task also zeros the left encoder on its next tick — that is fine.</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span>  <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span><span class="o">.</span><span class="n">zero</span><span class="p">()</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span><span class="o">.</span><span class="n">zero</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_enc_l0</span>     <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_enc_r0</span>     <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_s_hat0</span>     <span class="o">=</span> <span class="mf">0.0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_psi_hat0</span>   <span class="o">=</span> <span class="mf">0.0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_s_hat_init</span> <span class="o">=</span> <span class="kc">False</span>  <span class="c1"># will latch on first display tick</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_imu_psi0</span>   <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_imu_heading</span><span class="o">.</span><span class="n">get</span><span class="p">()</span> <span class="ow">or</span> <span class="mf">0.0</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_imu_heading</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mf">0.0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;LF ON (10 s)</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;t_s,err,sL_meas,sR_meas,psi_imu,pdot_imu,sL_hat,sR_hat,psi_hat,pdot_hat,omL_hat,omR_hat</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="c1"># Drain any trailing \r or \n left in the buffer from the command</span>
+        <span class="c1"># that triggered this (e.g. step_tool sends &#39;f\r\n&#39; so the \n</span>
+        <span class="c1"># would immediately cancel the run on the next tick).</span>
+        <span class="k">while</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">any</span><span class="p">():</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">read1</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S4_LF</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_lf_print</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">t_s</span><span class="p">,</span> <span class="n">err</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span>  <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span><span class="o">.</span><span class="n">update</span><span class="p">()</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span><span class="o">.</span><span class="n">update</span><span class="p">()</span>
+        <span class="n">l_pos</span> <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span><span class="o">.</span><span class="n">get_position</span><span class="p">()</span>  <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lf_enc_l0</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span>  <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+        <span class="n">r_pos</span> <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span><span class="o">.</span><span class="n">get_position</span><span class="p">()</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lf_enc_r0</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+        <span class="n">sL_m</span> <span class="o">=</span> <span class="o">-</span><span class="n">l_pos</span> <span class="o">*</span> <span class="n">MM_PER_COUNT</span>
+        <span class="n">sR_m</span> <span class="o">=</span> <span class="o">-</span><span class="n">r_pos</span> <span class="o">*</span> <span class="n">MM_PER_COUNT</span>
+        <span class="n">psi_imu</span>  <span class="o">=</span> <span class="p">((</span><span class="bp">self</span><span class="o">.</span><span class="n">_imu_heading</span><span class="o">.</span><span class="n">get</span><span class="p">()</span> <span class="ow">or</span> <span class="mf">0.0</span><span class="p">)</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lf_imu_psi0</span><span class="p">)</span> <span class="o">*</span> <span class="mf">0.017453</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_imu_heading</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mf">0.0</span>
+        <span class="n">pdot_imu</span> <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_imu_yawrate</span><span class="o">.</span><span class="n">get</span><span class="p">()</span> <span class="ow">or</span> <span class="mf">0.0</span><span class="p">)</span> <span class="o">*</span> <span class="mf">0.017453</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_imu_yawrate</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mf">0.0</span>
+        <span class="n">s_hat_v</span>   <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_s_hat</span><span class="o">.</span><span class="n">get</span><span class="p">()</span>   <span class="ow">or</span> <span class="mf">0.0</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_s_hat</span>   <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mf">0.0</span>
+        <span class="n">psi_hat_v</span> <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_psi_hat</span><span class="o">.</span><span class="n">get</span><span class="p">()</span> <span class="ow">or</span> <span class="mf">0.0</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_psi_hat</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mf">0.0</span>
+        <span class="n">omL_v</span>     <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_omL_hat</span><span class="o">.</span><span class="n">get</span><span class="p">()</span> <span class="ow">or</span> <span class="mf">0.0</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_omL_hat</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mf">0.0</span>
+        <span class="n">omR_v</span>     <span class="o">=</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_omR_hat</span><span class="o">.</span><span class="n">get</span><span class="p">()</span> <span class="ow">or</span> <span class="mf">0.0</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_omR_hat</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mf">0.0</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lf_s_hat_init</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_lf_s_hat0</span>     <span class="o">=</span> <span class="n">s_hat_v</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_lf_psi_hat0</span>   <span class="o">=</span> <span class="n">psi_hat_v</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_lf_s_hat_init</span> <span class="o">=</span> <span class="kc">True</span>
+        <span class="n">s_rel</span>    <span class="o">=</span> <span class="n">s_hat_v</span>   <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lf_s_hat0</span>
+        <span class="n">psi_rel</span>  <span class="o">=</span> <span class="n">psi_hat_v</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lf_psi_hat0</span>
+        <span class="n">sL_hat_v</span> <span class="o">=</span> <span class="p">(</span><span class="n">s_rel</span> <span class="o">-</span> <span class="mf">0.0745</span> <span class="o">*</span> <span class="n">psi_rel</span><span class="p">)</span> <span class="o">*</span> <span class="mf">1000.0</span>
+        <span class="n">sR_hat_v</span> <span class="o">=</span> <span class="p">(</span><span class="n">s_rel</span> <span class="o">+</span> <span class="mf">0.0745</span> <span class="o">*</span> <span class="n">psi_rel</span><span class="p">)</span> <span class="o">*</span> <span class="mf">1000.0</span>
+        <span class="n">pdot_hat</span> <span class="o">=</span> <span class="p">(</span><span class="n">omR_v</span> <span class="o">-</span> <span class="n">omL_v</span><span class="p">)</span> <span class="o">*</span> <span class="mf">0.2349</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;</span><span class="si">{:.3f}</span><span class="s2">,</span><span class="si">{:+.4f}</span><span class="s2">,</span><span class="si">{:.4f}</span><span class="s2">,</span><span class="si">{:.4f}</span><span class="s2">,</span><span class="si">{:.4f}</span><span class="s2">,</span><span class="si">{:.4f}</span><span class="s2">,</span><span class="si">{:.4f}</span><span class="s2">,</span><span class="si">{:.4f}</span><span class="s2">,</span><span class="si">{:.4f}</span><span class="s2">,</span><span class="si">{:.4f}</span><span class="s2">,</span><span class="si">{:.3f}</span><span class="s2">,</span><span class="si">{:.3f}</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span>
+            <span class="n">t_s</span><span class="p">,</span> <span class="n">err</span><span class="p">,</span> <span class="n">sL_m</span><span class="p">,</span> <span class="n">sR_m</span><span class="p">,</span> <span class="n">psi_imu</span><span class="p">,</span> <span class="n">pdot_imu</span><span class="p">,</span> <span class="n">sL_hat_v</span><span class="p">,</span> <span class="n">sR_hat_v</span><span class="p">,</span> <span class="n">psi_rel</span><span class="p">,</span> <span class="n">pdot_hat</span><span class="p">,</span> <span class="n">omL_v</span><span class="p">,</span> <span class="n">omR_v</span><span class="p">))</span>
+
+    <span class="c1"># ------------------------------------------------------------------</span>
+    <span class="c1"># Motor test helpers</span>
+    <span class="c1"># ------------------------------------------------------------------</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_mot_test_begin</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">left</span><span class="p">:</span> <span class="nb">bool</span><span class="p">):</span>
+        <span class="c1"># Full disarm: keep ALL task flags False so no other task touches motors</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_arm</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_en</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorGo</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorGo</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEffortCmd</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_leftEffortCmd</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="mf">0.0</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEffortCmd</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_rightEffortCmd</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="mf">0.0</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">left</span><span class="p">:</span>
+            <span class="c1"># Zero right motor effort; leave hardware state to task_motor</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorDrv</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorDrv</span><span class="o">.</span><span class="n">set_effort</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorDrv</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorDrv</span><span class="o">.</span><span class="n">enable</span><span class="p">()</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorDrv</span><span class="o">.</span><span class="n">set_effort</span><span class="p">(</span><span class="o">-</span><span class="n">MOT_TEST_EFFORT</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;LEFT motor test ON (2 s)  x=cancel</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S6_MOT_L</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="c1"># Zero left motor effort; leave hardware state to task_motor</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorDrv</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorDrv</span><span class="o">.</span><span class="n">set_effort</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorDrv</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorDrv</span><span class="o">.</span><span class="n">enable</span><span class="p">()</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorDrv</span><span class="o">.</span><span class="n">set_effort</span><span class="p">(</span><span class="o">-</span><span class="n">MOT_TEST_EFFORT</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;RIGHT motor test ON (2 s)  x=cancel</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S7_MOT_R</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mot_start_ms</span> <span class="o">=</span> <span class="n">ticks_ms</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mot_print_ms</span> <span class="o">=</span> <span class="n">ticks_ms</span><span class="p">()</span>
+        <span class="c1"># Drain trailing \r\n from the triggering keypress</span>
+        <span class="k">while</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">any</span><span class="p">():</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">read1</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_straight_begin</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_arm</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_en</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorGo</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorGo</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEffortCmd</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_leftEffortCmd</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="mf">0.0</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEffortCmd</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_rightEffortCmd</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="mf">0.0</span><span class="p">)</span>
+
+        <span class="n">effort</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">MOT_TEST_EFFORT</span><span class="p">)</span>
+        <span class="n">r_offset</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_right_offset</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_right_offset</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mf">0.0</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorDrv</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorDrv</span><span class="o">.</span><span class="n">enable</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorDrv</span><span class="o">.</span><span class="n">set_effort</span><span class="p">(</span><span class="o">-</span><span class="n">effort</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorDrv</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorDrv</span><span class="o">.</span><span class="n">enable</span><span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorDrv</span><span class="o">.</span><span class="n">set_effort</span><span class="p">(</span><span class="o">-</span><span class="p">(</span><span class="n">effort</span> <span class="o">+</span> <span class="n">r_offset</span><span class="p">))</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;STRAIGHT test ON (3 s)  x=cancel</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;Veers LEFT  -&gt; increase RIGHT_OFFSET in main.py</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;Veers RIGHT -&gt; decrease RIGHT_OFFSET (or go negative)</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mot_start_ms</span> <span class="o">=</span> <span class="n">ticks_ms</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mot_print_ms</span> <span class="o">=</span> <span class="n">ticks_ms</span><span class="p">()</span>
+        <span class="k">while</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">any</span><span class="p">():</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">read1</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S8_STRAIGHT</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_mot_test_done</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">label</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="c1"># Zero effort on both drivers directly (they were driven directly during the test)</span>
+        <span class="c1"># then hand ownership back to task_motor by zeroing all flags.</span>
+        <span class="c1"># Do NOT call disable() here — task_motor will call _safe_off() itself</span>
+        <span class="c1"># on the next tick when it sees arm=False/goFlag=False, keeping its</span>
+        <span class="c1"># internal state consistent and allowing a clean restart via &#39;f&#39;.</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorDrv</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorDrv</span><span class="o">.</span><span class="n">set_effort</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorDrv</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorDrv</span><span class="o">.</span><span class="n">set_effort</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_arm</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lf_en</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_leftMotorGo</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_rightMotorGo</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="kc">False</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEffortCmd</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_leftEffortCmd</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="mf">0.0</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEffortCmd</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_rightEffortCmd</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="mf">0.0</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\r\n</span><span class="si">{}</span><span class="s2"> test DONE  f=start  l=left  r=right  c=calibrate</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">label</span><span class="p">)</span> <span class="o">+</span> <span class="n">UI_prompt</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S1_CMD</span>
+
+    <span class="c1"># ------------------------------------------------------------------</span>
+    <span class="c1"># Calibration helpers</span>
+    <span class="c1"># ------------------------------------------------------------------</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_cal_enter</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_disarm</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_white_adc</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_black_adc</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_cal_print_ms</span> <span class="o">=</span> <span class="n">ticks_ms</span><span class="p">()</span> <span class="o">-</span> <span class="n">CAL_PRINT_MS</span>  <span class="c1"># print immediately</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\r\n</span><span class="s2">--- CALIBRATION MODE ---</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;w=capture white  b=capture black  x=exit</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="c1"># Drain trailing \r\n from the &#39;c&#39; command</span>
+        <span class="k">while</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">any</span><span class="p">():</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">read1</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S5_CAL</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_cal_print_live</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">readings</span><span class="p">):</span>
+        <span class="c1"># compute error using current cal values (or raw if not calibrated)</span>
+        <span class="n">white</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_white_adc</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_white_adc</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">min</span><span class="p">(</span><span class="n">readings</span><span class="p">)</span>
+        <span class="n">black</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_black_adc</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_black_adc</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">max</span><span class="p">(</span><span class="n">readings</span><span class="p">)</span>
+        <span class="n">scale</span> <span class="o">=</span> <span class="n">black</span> <span class="o">-</span> <span class="n">white</span>
+        <span class="k">if</span> <span class="n">scale</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">error</span> <span class="o">=</span> <span class="mf">0.0</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">weights</span> <span class="o">=</span> <span class="p">[</span><span class="n">i</span> <span class="o">-</span> <span class="p">(</span><span class="n">N_SENSORS</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span> <span class="o">/</span> <span class="mf">2.0</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">N_SENSORS</span><span class="p">)]</span>
+            <span class="n">num</span> <span class="o">=</span> <span class="mf">0.0</span>
+            <span class="n">den</span> <span class="o">=</span> <span class="mf">0.0</span>
+            <span class="k">for</span> <span class="n">w</span><span class="p">,</span> <span class="n">r</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">weights</span><span class="p">,</span> <span class="n">readings</span><span class="p">):</span>
+                <span class="n">n</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="mf">0.0</span><span class="p">,</span> <span class="nb">min</span><span class="p">(</span><span class="mf">1.0</span><span class="p">,</span> <span class="p">(</span><span class="n">r</span> <span class="o">-</span> <span class="n">white</span><span class="p">)</span> <span class="o">/</span> <span class="n">scale</span><span class="p">))</span>
+                <span class="n">num</span> <span class="o">+=</span> <span class="n">w</span> <span class="o">*</span> <span class="n">n</span>
+                <span class="n">den</span> <span class="o">+=</span> <span class="n">n</span>
+            <span class="n">error</span> <span class="o">=</span> <span class="p">(</span><span class="n">num</span> <span class="o">/</span> <span class="n">den</span><span class="p">)</span> <span class="k">if</span> <span class="n">den</span> <span class="o">&gt;</span> <span class="mf">0.01</span> <span class="k">else</span> <span class="mf">0.0</span>
+
+        <span class="c1"># status line: W/B capture state</span>
+        <span class="n">w_str</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_white_adc</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_white_adc</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="s2">&quot;???&quot;</span>
+        <span class="n">b_str</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_black_adc</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_black_adc</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="s2">&quot;???&quot;</span>
+        <span class="n">adc_str</span> <span class="o">=</span> <span class="s2">&quot;,&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">r</span><span class="p">))</span> <span class="k">for</span> <span class="n">r</span> <span class="ow">in</span> <span class="n">readings</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;W=</span><span class="si">{}</span><span class="s2"> B=</span><span class="si">{}</span><span class="s2"> ERR=</span><span class="si">{:+.3f}</span><span class="s2"> | </span><span class="si">{}</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span>
+            <span class="n">w_str</span><span class="p">,</span> <span class="n">b_str</span><span class="p">,</span> <span class="n">error</span><span class="p">,</span> <span class="n">adc_str</span><span class="p">))</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_cal_capture_white</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">readings</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_white_adc</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="nb">sum</span><span class="p">(</span><span class="n">readings</span><span class="p">)</span> <span class="o">/</span> <span class="nb">len</span><span class="p">(</span><span class="n">readings</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;&gt;&gt; WHITE captured: </span><span class="si">{}</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_white_adc</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_cal_try_recommend</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_cal_capture_black</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">readings</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_black_adc</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="nb">max</span><span class="p">(</span><span class="n">readings</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;&gt;&gt; BLACK captured: </span><span class="si">{}</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_black_adc</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_cal_try_recommend</span><span class="p">()</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_cal_try_recommend</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_white_adc</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_black_adc</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span>
+        <span class="n">w</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_white_adc</span>
+        <span class="n">b</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_black_adc</span>
+        <span class="n">contrast</span> <span class="o">=</span> <span class="nb">abs</span><span class="p">(</span><span class="n">b</span> <span class="o">-</span> <span class="n">w</span><span class="p">)</span> <span class="o">/</span> <span class="mf">4095.0</span> <span class="o">*</span> <span class="mf">100.0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\r\n</span><span class="s2">=== CAL RESULTS ===</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;white_adc=</span><span class="si">{}</span><span class="s2"> black_adc=</span><span class="si">{}</span><span class="s2"> contrast=</span><span class="si">{:.1f}</span><span class="s2">%</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">w</span><span class="p">,</span> <span class="n">b</span><span class="p">,</span> <span class="n">contrast</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;Copy into main.py: black_adc=</span><span class="si">{}</span><span class="s2"> white_adc=</span><span class="si">{}</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">b</span><span class="p">,</span> <span class="n">w</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;Press x to exit.</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)</span>
+
+    <span class="c1"># ------------------------------------------------------------------</span>
+    <span class="c1"># Main generator</span>
+    <span class="c1"># ------------------------------------------------------------------</span>
+<div class="viewcode-block" id="task_user.run">
+<a class="viewcode-back" href="../task_user.html#task_user.task_user.run">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+
+            <span class="c1"># ---- S0: init ----</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">S0_INIT</span><span class="p">:</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_disarm</span><span class="p">()</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\r\n</span><span class="s2">READY  f=line  l=left  r=right  s=straight  c=cal</span><span class="se">\r\n</span><span class="s2">&quot;</span> <span class="o">+</span> <span class="n">UI_prompt</span><span class="p">)</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S1_CMD</span>
+
+            <span class="c1"># ---- S1: waiting for keypress ----</span>
+            <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">S1_CMD</span><span class="p">:</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">any</span><span class="p">():</span>
+                    <span class="n">b</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">read1</span><span class="p">()</span>
+                    <span class="k">if</span> <span class="n">b</span><span class="p">:</span>
+                        <span class="k">try</span><span class="p">:</span>
+                            <span class="n">ch</span> <span class="o">=</span> <span class="n">b</span><span class="o">.</span><span class="n">decode</span><span class="p">()</span>
+                        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+                            <span class="n">ch</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+
+                        <span class="k">if</span> <span class="n">ch</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;f&quot;</span><span class="p">,</span> <span class="s2">&quot;F&quot;</span><span class="p">}:</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_lf_begin</span><span class="p">()</span>
+                        <span class="k">elif</span> <span class="n">ch</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;l&quot;</span><span class="p">,</span> <span class="s2">&quot;L&quot;</span><span class="p">}:</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_mot_test_begin</span><span class="p">(</span><span class="n">left</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+                        <span class="k">elif</span> <span class="n">ch</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;r&quot;</span><span class="p">,</span> <span class="s2">&quot;R&quot;</span><span class="p">}:</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_mot_test_begin</span><span class="p">(</span><span class="n">left</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+                        <span class="k">elif</span> <span class="n">ch</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;s&quot;</span><span class="p">,</span> <span class="s2">&quot;S&quot;</span><span class="p">}:</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_straight_begin</span><span class="p">()</span>
+                        <span class="k">elif</span> <span class="n">ch</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;c&quot;</span><span class="p">,</span> <span class="s2">&quot;C&quot;</span><span class="p">}:</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_cal_enter</span><span class="p">()</span>
+                        <span class="k">else</span><span class="p">:</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_disarm</span><span class="p">()</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\r\n</span><span class="s2">STOPPED  f=line  l=left  r=right  s=straight  c=cal</span><span class="se">\r\n</span><span class="s2">&quot;</span> <span class="o">+</span> <span class="n">UI_prompt</span><span class="p">)</span>
+
+                        <span class="k">yield</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span>
+                        <span class="k">continue</span>
+
+            <span class="c1"># ---- S4: line-follow timed run ----</span>
+            <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">S4_LF</span><span class="p">:</span>
+                <span class="n">elapsed</span> <span class="o">=</span> <span class="n">ticks_diff</span><span class="p">(</span><span class="n">ticks_ms</span><span class="p">(),</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lf_start_ms</span><span class="p">)</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">any</span><span class="p">():</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">read1</span><span class="p">()</span>   <span class="c1"># consume key</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_disarm</span><span class="p">()</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_print_odometry</span><span class="p">()</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\r\n</span><span class="s2">LF CANCELLED  f=line  c=cal</span><span class="se">\r\n</span><span class="s2">&quot;</span> <span class="o">+</span> <span class="n">UI_prompt</span><span class="p">)</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S1_CMD</span>
+                    <span class="k">yield</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span>
+                    <span class="k">continue</span>
+
+                <span class="c1"># Print line error + encoder data at ~50 ms intervals</span>
+                <span class="n">now_ms</span> <span class="o">=</span> <span class="n">ticks_ms</span><span class="p">()</span>
+                <span class="k">if</span> <span class="n">ticks_diff</span><span class="p">(</span><span class="n">now_ms</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_lf_print_ms</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="mi">50</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_lf_print_ms</span> <span class="o">=</span> <span class="n">now_ms</span>
+                    <span class="n">t_s</span> <span class="o">=</span> <span class="n">elapsed</span> <span class="o">/</span> <span class="mf">1000.0</span>
+                    <span class="n">err</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_line_err</span><span class="o">.</span><span class="n">get</span><span class="p">()</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_line_err</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mf">0.0</span>
+
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_lf_print</span><span class="p">(</span><span class="n">t_s</span><span class="p">,</span> <span class="n">err</span><span class="p">)</span>
+
+                <span class="k">if</span> <span class="n">elapsed</span> <span class="o">&gt;=</span> <span class="n">LF_DURATION_MS</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_disarm</span><span class="p">()</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_print_odometry</span><span class="p">()</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\r\n</span><span class="s2">LF DONE (10 s)  f=line  c=cal</span><span class="se">\r\n</span><span class="s2">&quot;</span> <span class="o">+</span> <span class="n">UI_prompt</span><span class="p">)</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S1_CMD</span>
+
+            <span class="c1"># ---- S6: left motor test ----</span>
+            <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">S6_MOT_L</span><span class="p">:</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">any</span><span class="p">():</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">read1</span><span class="p">()</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_mot_test_done</span><span class="p">(</span><span class="s2">&quot;LEFT motor&quot;</span><span class="p">)</span>
+                    <span class="k">yield</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span>
+                    <span class="k">continue</span>
+
+                <span class="c1"># Print both encoder positions at ~100 ms intervals</span>
+                <span class="n">now_ms</span> <span class="o">=</span> <span class="n">ticks_ms</span><span class="p">()</span>
+                <span class="k">if</span> <span class="n">ticks_diff</span><span class="p">(</span><span class="n">now_ms</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mot_print_ms</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="mi">100</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_mot_print_ms</span> <span class="o">=</span> <span class="n">now_ms</span>
+                    <span class="n">elapsed</span> <span class="o">=</span> <span class="n">ticks_diff</span><span class="p">(</span><span class="n">now_ms</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mot_start_ms</span><span class="p">)</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span><span class="o">.</span><span class="n">update</span><span class="p">()</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span><span class="o">.</span><span class="n">update</span><span class="p">()</span>
+                    <span class="n">l_pos</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span><span class="o">.</span><span class="n">get_position</span><span class="p">()</span>  <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span>  <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                    <span class="n">r_pos</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span><span class="o">.</span><span class="n">get_position</span><span class="p">()</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                    <span class="n">l_vel</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span><span class="o">.</span><span class="n">get_velocity</span><span class="p">()</span>  <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span>  <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                    <span class="n">r_vel</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span><span class="o">.</span><span class="n">get_velocity</span><span class="p">()</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                    <span class="n">l_raw</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span><span class="o">.</span><span class="n">tim_pin</span><span class="o">.</span><span class="n">counter</span><span class="p">()</span>  <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span>  <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                    <span class="n">r_raw</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span><span class="o">.</span><span class="n">tim_pin</span><span class="o">.</span><span class="n">counter</span><span class="p">()</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;L=(</span><span class="si">{}</span><span class="s2">,</span><span class="si">{:.0f}</span><span class="s2">,</span><span class="si">{}</span><span class="s2">) R=(</span><span class="si">{}</span><span class="s2">,</span><span class="si">{:.0f}</span><span class="s2">,</span><span class="si">{}</span><span class="s2">) t=</span><span class="si">{:.2f}</span><span class="s2">s</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span>
+                        <span class="n">l_pos</span><span class="p">,</span> <span class="n">l_vel</span><span class="p">,</span> <span class="n">l_raw</span><span class="p">,</span> <span class="n">r_pos</span><span class="p">,</span> <span class="n">r_vel</span><span class="p">,</span> <span class="n">r_raw</span><span class="p">,</span> <span class="n">elapsed</span> <span class="o">/</span> <span class="mf">1000.0</span><span class="p">))</span>
+
+                <span class="k">if</span> <span class="n">ticks_diff</span><span class="p">(</span><span class="n">ticks_ms</span><span class="p">(),</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mot_start_ms</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="n">MOT_TEST_MS</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_mot_test_done</span><span class="p">(</span><span class="s2">&quot;LEFT motor&quot;</span><span class="p">)</span>
+
+            <span class="c1"># ---- S7: right motor test ----</span>
+            <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">S7_MOT_R</span><span class="p">:</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">any</span><span class="p">():</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">read1</span><span class="p">()</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_mot_test_done</span><span class="p">(</span><span class="s2">&quot;RIGHT motor&quot;</span><span class="p">)</span>
+                    <span class="k">yield</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span>
+                    <span class="k">continue</span>
+
+                <span class="c1"># Print both encoder positions at ~100 ms intervals</span>
+                <span class="n">now_ms</span> <span class="o">=</span> <span class="n">ticks_ms</span><span class="p">()</span>
+                <span class="k">if</span> <span class="n">ticks_diff</span><span class="p">(</span><span class="n">now_ms</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mot_print_ms</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="mi">100</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_mot_print_ms</span> <span class="o">=</span> <span class="n">now_ms</span>
+                    <span class="n">elapsed</span> <span class="o">=</span> <span class="n">ticks_diff</span><span class="p">(</span><span class="n">now_ms</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mot_start_ms</span><span class="p">)</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span><span class="o">.</span><span class="n">update</span><span class="p">()</span>
+                    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                        <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span><span class="o">.</span><span class="n">update</span><span class="p">()</span>
+                    <span class="n">l_pos</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span><span class="o">.</span><span class="n">get_position</span><span class="p">()</span>  <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span>  <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                    <span class="n">r_pos</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span><span class="o">.</span><span class="n">get_position</span><span class="p">()</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                    <span class="n">l_vel</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span><span class="o">.</span><span class="n">get_velocity</span><span class="p">()</span>  <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span>  <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                    <span class="n">r_vel</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span><span class="o">.</span><span class="n">get_velocity</span><span class="p">()</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                    <span class="n">l_raw</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span><span class="o">.</span><span class="n">tim_pin</span><span class="o">.</span><span class="n">counter</span><span class="p">()</span>  <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span>  <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                    <span class="n">r_raw</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span><span class="o">.</span><span class="n">tim_pin</span><span class="o">.</span><span class="n">counter</span><span class="p">()</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;L=(</span><span class="si">{}</span><span class="s2">,</span><span class="si">{:.0f}</span><span class="s2">,</span><span class="si">{}</span><span class="s2">) R=(</span><span class="si">{}</span><span class="s2">,</span><span class="si">{:.0f}</span><span class="s2">,</span><span class="si">{}</span><span class="s2">) t=</span><span class="si">{:.2f}</span><span class="s2">s</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span>
+                        <span class="n">l_pos</span><span class="p">,</span> <span class="n">l_vel</span><span class="p">,</span> <span class="n">l_raw</span><span class="p">,</span> <span class="n">r_pos</span><span class="p">,</span> <span class="n">r_vel</span><span class="p">,</span> <span class="n">r_raw</span><span class="p">,</span> <span class="n">elapsed</span> <span class="o">/</span> <span class="mf">1000.0</span><span class="p">))</span>
+
+                <span class="k">if</span> <span class="n">ticks_diff</span><span class="p">(</span><span class="n">ticks_ms</span><span class="p">(),</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mot_start_ms</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="n">MOT_TEST_MS</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_mot_test_done</span><span class="p">(</span><span class="s2">&quot;RIGHT motor&quot;</span><span class="p">)</span>
+
+            <span class="c1"># ---- S8: straight-line trim test ----</span>
+            <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">S8_STRAIGHT</span><span class="p">:</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">any</span><span class="p">():</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">read1</span><span class="p">()</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_mot_test_done</span><span class="p">(</span><span class="s2">&quot;STRAIGHT&quot;</span><span class="p">)</span>
+                    <span class="k">yield</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span>
+                    <span class="k">continue</span>
+
+                <span class="c1"># Print both encoder positions at ~100 ms so you can see drift</span>
+                <span class="n">now_ms</span> <span class="o">=</span> <span class="n">ticks_ms</span><span class="p">()</span>
+                <span class="k">if</span> <span class="n">ticks_diff</span><span class="p">(</span><span class="n">now_ms</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mot_print_ms</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="mi">100</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_mot_print_ms</span> <span class="o">=</span> <span class="n">now_ms</span>
+                    <span class="n">elapsed</span> <span class="o">=</span> <span class="n">ticks_diff</span><span class="p">(</span><span class="n">now_ms</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mot_start_ms</span><span class="p">)</span>
+                    <span class="n">l_pos</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span><span class="o">.</span><span class="n">get_position</span><span class="p">()</span>  <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_leftEncoder</span>  <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                    <span class="n">r_pos</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span><span class="o">.</span><span class="n">get_position</span><span class="p">()</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rightEncoder</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="mi">0</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;t=</span><span class="si">{:.2f}</span><span class="s2">s  L=</span><span class="si">{:.2f}</span><span class="s2">in  R=</span><span class="si">{:.2f}</span><span class="s2">in  diff=</span><span class="si">{:.2f}</span><span class="s2">in</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span>
+                        <span class="n">elapsed</span> <span class="o">/</span> <span class="mf">1000.0</span><span class="p">,</span> <span class="n">l_pos</span><span class="p">,</span> <span class="n">r_pos</span><span class="p">,</span> <span class="n">l_pos</span> <span class="o">-</span> <span class="n">r_pos</span><span class="p">))</span>
+
+                <span class="k">if</span> <span class="n">ticks_diff</span><span class="p">(</span><span class="n">ticks_ms</span><span class="p">(),</span> <span class="bp">self</span><span class="o">.</span><span class="n">_mot_start_ms</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="n">STRAIGHT_TEST_MS</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_mot_test_done</span><span class="p">(</span><span class="s2">&quot;STRAIGHT&quot;</span><span class="p">)</span>
+
+            <span class="c1"># ---- S5: calibration mode ----</span>
+            <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">S5_CAL</span><span class="p">:</span>
+
+                <span class="c1"># check for keypress</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">any</span><span class="p">():</span>
+                    <span class="n">b</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">read1</span><span class="p">()</span>
+                    <span class="k">if</span> <span class="n">b</span><span class="p">:</span>
+                        <span class="k">try</span><span class="p">:</span>
+                            <span class="n">ch</span> <span class="o">=</span> <span class="n">b</span><span class="o">.</span><span class="n">decode</span><span class="p">()</span>
+                        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+                            <span class="n">ch</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+                        <span class="n">readings</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sensor</span><span class="o">.</span><span class="n">get_raw_readings</span><span class="p">()</span>
+                        <span class="k">if</span> <span class="n">ch</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;w&quot;</span><span class="p">,</span> <span class="s2">&quot;W&quot;</span><span class="p">}:</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_cal_capture_white</span><span class="p">(</span><span class="n">readings</span><span class="p">)</span>
+                        <span class="k">elif</span> <span class="n">ch</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;b&quot;</span><span class="p">,</span> <span class="s2">&quot;B&quot;</span><span class="p">}:</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_cal_capture_black</span><span class="p">(</span><span class="n">readings</span><span class="p">)</span>
+                        <span class="k">elif</span> <span class="n">ch</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;x&quot;</span><span class="p">,</span> <span class="s2">&quot;X&quot;</span><span class="p">,</span> <span class="s2">&quot;q&quot;</span><span class="p">,</span> <span class="s2">&quot;Q&quot;</span><span class="p">}:</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_io</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\r\n</span><span class="s2">Exiting calibration.</span><span class="se">\r\n</span><span class="s2">&quot;</span> <span class="o">+</span> <span class="n">UI_prompt</span><span class="p">)</span>
+                            <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S1_CMD</span>
+                            <span class="k">yield</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span>
+                            <span class="k">continue</span>
+
+                <span class="c1"># print live readings periodically</span>
+                <span class="n">now</span> <span class="o">=</span> <span class="n">ticks_ms</span><span class="p">()</span>
+                <span class="k">if</span> <span class="n">ticks_diff</span><span class="p">(</span><span class="n">now</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cal_print_ms</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="n">CAL_PRINT_MS</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_cal_print_ms</span> <span class="o">=</span> <span class="n">now</span>
+                    <span class="n">readings</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sensor</span><span class="o">.</span><span class="n">get_raw_readings</span><span class="p">()</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_cal_print_live</span><span class="p">(</span><span class="n">readings</span><span class="p">)</span>
+
+            <span class="k">yield</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span></div>
+</div>
+
+</pre></div>
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../index.html">405 Project</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../modules.html">405</a></li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../index.html">Documentation overview</a><ul>
+  <li><a href="index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;2026, Fredy Herrarte and Ethan Liu.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 9.1.0</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>
