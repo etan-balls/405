@@ -6,18 +6,45 @@
 405 Project Documentation
 =========================
 
-Welcome to the documentation for the 405 project.
+Welcome to the documentation for the 405 autonomous robot project.
 
-This site contains an overview of the system architecture, module-level API
-documentation, and implementation details for the embedded control and sensing
-software.
+This site provides an overview of the system architecture, hardware interfaces,
+control strategy, and module-level implementation details for the embedded
+robotics software.
 
-Contents
---------
+Project Summary
+---------------
+
+This project implements an autonomous mobile robot capable of:
+
+- Following a black line using an IR reflectance sensor array
+- Measuring wheel motion with quadrature encoders
+- Estimating heading and motion using IMU and observer-based estimation
+- Controlling motors through PWM-based differential drive
+- Running multiple real-time subsystems using a cooperative task scheduler
+
+Documentation Contents
+----------------------
 
 .. toctree::
    :maxdepth: 2
-   :caption: Documentation
+   :caption: Contents:
 
    overview
-   modules
+   architecture
+   hardware
+   software
+   control
+
+API Reference
+-------------
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Module Reference:
+
+   modules/motor
+   modules/sensors
+   modules/control
+   modules/estimator
+   modules/tasks
