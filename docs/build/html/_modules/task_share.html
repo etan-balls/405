@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>task_share &#8212; 405 Project 1.0 documentation</title>
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="../_static/basic.css?v=b08954a9" />
+    <link rel="stylesheet" type="text/css" href="../_static/alabaster.css?v=27fed22d" />
+    <script src="../_static/documentation_options.js?v=f2a433a1"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+   
+  <link rel="stylesheet" href="../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <h1>Source code for task_share</h1><div class="highlight"><pre>
+<span></span><span class="c1">## @file task_share.py</span>
+<span class="c1">#  This file contains classes which allow tasks to share data without the risk</span>
+<span class="c1">#  of data corruption by interrupts. </span>
+<span class="c1">#</span>
+<span class="c1">#  @author JR Ridgely</span>
+<span class="c1">#  @date   2017-Jan-01 JRR Approximate date of creation of file</span>
+<span class="c1">#  @date   2021-Dec-18 JRR Docstrings changed to work without DoxyPyPy</span>
+<span class="c1">#  @copyright This program is copyright (c) 2017-2023 by JR Ridgely and released</span>
+<span class="c1">#             under the GNU Public License, version 3.0. </span>
+<span class="c1"># </span>
+<span class="c1">#  It is intended for educational use only, but its use is not limited thereto.</span>
+<span class="c1">#  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot;</span>
+<span class="c1">#  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE</span>
+<span class="c1">#  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE</span>
+<span class="c1">#  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE</span>
+<span class="c1">#  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR</span>
+<span class="c1">#  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF</span>
+<span class="c1">#  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS</span>
+<span class="c1">#  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN</span>
+<span class="c1">#  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)</span>
+<span class="c1">#  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE</span>
+<span class="c1">#  POSSIBILITY OF SUCH DAMAGE.</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">array</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">gc</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">pyb</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">micropython</span>
+
+
+<span class="c1">## This is a system-wide list of all the queues and shared variables. It is</span>
+<span class="c1">#  used to create diagnostic printouts. </span>
+<span class="n">share_list</span> <span class="o">=</span> <span class="p">[]</span>
+
+<span class="c1">## This dictionary allows readable printouts of queue and share data types.</span>
+<span class="n">type_code_strings</span> <span class="o">=</span> <span class="p">{</span><span class="s1">&#39;b&#39;</span> <span class="p">:</span> <span class="s2">&quot;int8&quot;</span><span class="p">,</span>   <span class="s1">&#39;B&#39;</span> <span class="p">:</span> <span class="s2">&quot;uint8&quot;</span><span class="p">,</span>
+                     <span class="s1">&#39;h&#39;</span> <span class="p">:</span> <span class="s2">&quot;int16&quot;</span><span class="p">,</span>  <span class="s1">&#39;H&#39;</span> <span class="p">:</span> <span class="s2">&quot;uint16&quot;</span><span class="p">,</span>
+                     <span class="s1">&#39;i&#39;</span> <span class="p">:</span> <span class="s2">&quot;int(?)&quot;</span><span class="p">,</span> <span class="s1">&#39;I&#39;</span> <span class="p">:</span> <span class="s2">&quot;uint(?)&quot;</span><span class="p">,</span>
+                     <span class="s1">&#39;l&#39;</span> <span class="p">:</span> <span class="s2">&quot;int32&quot;</span><span class="p">,</span>  <span class="s1">&#39;L&#39;</span> <span class="p">:</span> <span class="s2">&quot;uint32&quot;</span><span class="p">,</span>
+                     <span class="s1">&#39;q&#39;</span> <span class="p">:</span> <span class="s2">&quot;int64&quot;</span><span class="p">,</span>  <span class="s1">&#39;Q&#39;</span> <span class="p">:</span> <span class="s2">&quot;uint64&quot;</span><span class="p">,</span>
+                     <span class="s1">&#39;f&#39;</span> <span class="p">:</span> <span class="s2">&quot;float&quot;</span><span class="p">,</span>  <span class="s1">&#39;d&#39;</span> <span class="p">:</span> <span class="s2">&quot;double&quot;</span><span class="p">}</span>
+
+
+<span class="c1">## Create a string holding a diagnostic printout showing the status of</span>
+<span class="c1">#  each queue and share in the system. </span>
+<span class="c1">#  @return A string containing information about each queue and share</span>
+<div class="viewcode-block" id="show_all">
+<a class="viewcode-back" href="../task_share.html#task_share.show_all">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">show_all</span> <span class="p">():</span>
+    <span class="n">gen</span> <span class="o">=</span> <span class="p">(</span><span class="nb">str</span> <span class="p">(</span><span class="n">item</span><span class="p">)</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">share_list</span><span class="p">)</span>
+    <span class="k">return</span> <span class="s1">&#39;</span><span class="se">\n</span><span class="s1">&#39;</span><span class="o">.</span><span class="n">join</span> <span class="p">(</span><span class="n">gen</span><span class="p">)</span></div>
+
+
+
+<span class="c1">## Base class for queues and shares which exchange data between tasks.</span>
+<span class="c1"># </span>
+<span class="c1">#  One should never create an object from this class; it doesn&#39;t do anything</span>
+<span class="c1">#  useful. It exists to implement things which are common between its child</span>
+<span class="c1">#  classes @c Queue and @c Share. </span>
+<div class="viewcode-block" id="BaseShare">
+<a class="viewcode-back" href="../task_share.html#task_share.BaseShare">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">BaseShare</span><span class="p">:</span>
+
+    <span class="c1">## Create a base queue object when called by a child class initializer.</span>
+    <span class="c1">#</span>
+    <span class="c1">#  This method creates the things which queues and shares have in common.</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span> <span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">type_code</span><span class="p">,</span> <span class="n">thread_protect</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span> <span class="n">name</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_type_code</span> <span class="o">=</span> <span class="n">type_code</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_thread_protect</span> <span class="o">=</span> <span class="n">thread_protect</span>
+
+        <span class="c1"># Add this queue to the global share and queue list</span>
+        <span class="n">share_list</span><span class="o">.</span><span class="n">append</span> <span class="p">(</span><span class="bp">self</span><span class="p">)</span></div>
+
+
+
+<span class="c1">## A queue which is used to transfer data from one task to another.</span>
+<span class="c1">#</span>
+<span class="c1">#  If parameter &#39;thread_protect&#39; is @c True when a queue is created, transfers</span>
+<span class="c1">#  of data will be protected from corruption in the case that one task might</span>
+<span class="c1">#  interrupt another due to use in a pre-emptive multithreading environment or</span>
+<span class="c1">#  due to one task being run as an interrupt service routine.</span>
+<span class="c1">#</span>
+<span class="c1">#  An example of the creation and use of a queue is as follows:</span>
+<span class="c1">#</span>
+<span class="c1">#  @code</span>
+<span class="c1">#  import task_share</span>
+<span class="c1">#</span>
+<span class="c1">#  # This queue holds unsigned short (16-bit) integers</span>
+<span class="c1">#  my_queue = task_share.Queue (&#39;H&#39;, 100, name=&quot;My Queue&quot;)</span>
+<span class="c1">#</span>
+<span class="c1">#  # Somewhere in one task, put data into the queue</span>
+<span class="c1">#  my_queue.put (some_data)</span>
+<span class="c1">#</span>
+<span class="c1">#  # In another task, read data from the queue</span>
+<span class="c1">#  something = my_queue.get ()</span>
+<span class="c1">#  @endcode</span>
+<div class="viewcode-block" id="Queue">
+<a class="viewcode-back" href="../task_share.html#task_share.Queue">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Queue</span> <span class="p">(</span><span class="n">BaseShare</span><span class="p">):</span>
+
+    <span class="c1">## A counter used to give serial numbers to queues for diagnostic use.</span>
+    <span class="n">ser_num</span> <span class="o">=</span> <span class="mi">0</span>
+
+    <span class="c1">## Initialize a queue object to carry and buffer data between tasks.</span>
+    <span class="c1">#</span>
+    <span class="c1">#  This method sets up a queue by allocating memory for the contents and </span>
+    <span class="c1">#  setting up the components in an empty configuration. </span>
+    <span class="c1">#</span>
+    <span class="c1">#  Each queue can only carry data of one particular type which must be</span>
+    <span class="c1">#  chosen from the following list. The data type is specified by a </span>
+    <span class="c1">#  one-letter type code which is given as for the Python @c array.array</span>
+    <span class="c1">#  type, which can be any of the following:</span>
+    <span class="c1">#  |      |      |      |</span>
+    <span class="c1">#  |:-----|:-----|:-----|</span>
+    <span class="c1">#  | **b** (signed char) | **B** (unsigned char) | 8 bit integers |</span>
+    <span class="c1">#  | **h** (signed short) | **H** (unsigned short) | 16 bit integers |</span>
+    <span class="c1">#  | **i** (signed int) | **I** (unsigned int) | 32 bit integers (probably) |</span>
+    <span class="c1">#  | **l** (signed long) | **L** (unsigned long) | 32 bit integers |</span>
+    <span class="c1">#  | **q** (signed long long) | **Q** (unsigned long long) | 64 bit integers |</span>
+    <span class="c1">#  | **f** (float) | **d** (double-precision float) | |</span>
+    <span class="c1">#</span>
+    <span class="c1">#  @param type_code The type of data items which the queue can hold</span>
+    <span class="c1">#  @param size The maximum number of items which the queue can hold</span>
+    <span class="c1">#  @param thread_protect @c True if mutual exclusion protection is used</span>
+    <span class="c1">#  @param overwrite If @c True, oldest data will be overwritten with new</span>
+    <span class="c1">#         data if the queue becomes full </span>
+    <span class="c1">#  @param name A short name for the queue, default @c QueueN where @c N</span>
+    <span class="c1">#         is a serial number for the queue</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span> <span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">type_code</span><span class="p">,</span> <span class="n">size</span><span class="p">,</span> <span class="n">thread_protect</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span> 
+                  <span class="n">overwrite</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span> <span class="n">name</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+        <span class="c1"># First call the parent class initializer</span>
+        <span class="nb">super</span> <span class="p">()</span><span class="o">.</span><span class="fm">__init__</span> <span class="p">(</span><span class="n">type_code</span><span class="p">,</span> <span class="n">thread_protect</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_size</span> <span class="o">=</span> <span class="n">size</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_overwrite</span> <span class="o">=</span> <span class="n">overwrite</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_name</span> <span class="o">=</span> <span class="nb">str</span> <span class="p">(</span><span class="n">name</span><span class="p">)</span> <span class="k">if</span> <span class="n">name</span> <span class="o">!=</span> <span class="kc">None</span> \
+            <span class="k">else</span> <span class="s1">&#39;Queue&#39;</span> <span class="o">+</span> <span class="nb">str</span> <span class="p">(</span><span class="n">Queue</span><span class="o">.</span><span class="n">ser_num</span><span class="p">)</span>
+        <span class="n">Queue</span><span class="o">.</span><span class="n">ser_num</span> <span class="o">+=</span> <span class="mi">1</span>
+
+        <span class="c1"># Allocate memory in which the queue&#39;s data will be stored</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_buffer</span> <span class="o">=</span> <span class="n">array</span><span class="o">.</span><span class="n">array</span> <span class="p">(</span><span class="n">type_code</span><span class="p">,</span> <span class="nb">range</span> <span class="p">(</span><span class="n">size</span><span class="p">))</span>
+        <span class="k">except</span> <span class="ne">MemoryError</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_buffer</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="k">raise</span>
+        <span class="k">except</span> <span class="ne">ValueError</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_buffer</span> <span class="o">=</span> <span class="kc">None</span>
+            <span class="k">raise</span>
+
+        <span class="c1"># Initialize pointers to be used for reading and writing data</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">clear</span> <span class="p">()</span>
+
+        <span class="c1"># Since we may have allocated a bunch of memory, call the garbage</span>
+        <span class="c1"># collector to neaten up what memory is left for future use</span>
+        <span class="n">gc</span><span class="o">.</span><span class="n">collect</span> <span class="p">()</span>
+
+
+    <span class="c1">## Put an item into the queue.</span>
+    <span class="c1"># </span>
+    <span class="c1">#  If there isn&#39;t room for the item, wait (blocking the calling process)</span>
+    <span class="c1">#  until room becomes available, unless the @c overwrite constructor</span>
+    <span class="c1">#  parameter was set to @c True to allow old data to be clobbered. If</span>
+    <span class="c1">#  non-blocking behavior without overwriting is needed, one should call</span>
+    <span class="c1">#  @c full() to ensure that the queue is not full before putting data</span>
+    <span class="c1">#  into it:</span>
+    <span class="c1">#  @code</span>
+    <span class="c1">#     def some_task ():</span>
+    <span class="c1">#         # Setup</span>
+    <span class="c1">#         while True:</span>
+    <span class="c1">#             if not my_queue.full ():</span>
+    <span class="c1">#                 my_queue.put (create_something_to_put ())</span>
+    <span class="c1">#             yield 0</span>
+    <span class="c1">#  @endcode</span>
+    <span class="c1">#  @param item The item to be placed into the queue</span>
+    <span class="c1">#  @param in_ISR Set this to @c True if calling from within an ISR</span>
+    <span class="nd">@micropython</span><span class="o">.</span><span class="n">native</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">put</span> <span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">item</span><span class="p">,</span> <span class="n">in_ISR</span> <span class="o">=</span> <span class="kc">False</span><span class="p">):</span>
+        <span class="c1"># If we&#39;re in an ISR and the queue is full and we&#39;re not allowed to</span>
+        <span class="c1"># overwrite data, we have to give up and exit</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">full</span> <span class="p">():</span>
+            <span class="k">if</span> <span class="n">in_ISR</span><span class="p">:</span>
+                <span class="k">return</span>
+
+            <span class="c1"># Wait (if needed) until there&#39;s room in the buffer for the data</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_overwrite</span><span class="p">:</span>
+                <span class="k">while</span> <span class="bp">self</span><span class="o">.</span><span class="n">full</span> <span class="p">():</span>
+                    <span class="k">pass</span>
+
+        <span class="c1"># Prevent data corruption by blocking interrupts during data transfer</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_thread_protect</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">in_ISR</span><span class="p">:</span>
+            <span class="n">_irq_state</span> <span class="o">=</span> <span class="n">pyb</span><span class="o">.</span><span class="n">disable_irq</span> <span class="p">()</span>
+
+        <span class="c1"># Write the data and advance the counts and pointers</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_buffer</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">_wr_idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">item</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_wr_idx</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_wr_idx</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_size</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_wr_idx</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_num_items</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_num_items</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_size</span><span class="p">:</span>        <span class="c1"># Can&#39;t be fuller than full</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_num_items</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_size</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_num_items</span> <span class="o">&gt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">_max_full</span><span class="p">:</span>     <span class="c1"># Record maximum fillage</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_max_full</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_num_items</span>
+
+        <span class="c1"># Re-enable interrupts</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_thread_protect</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">in_ISR</span><span class="p">:</span>
+            <span class="n">pyb</span><span class="o">.</span><span class="n">enable_irq</span> <span class="p">(</span><span class="n">_irq_state</span><span class="p">)</span>
+
+
+    <span class="c1">## Read an item from the queue.</span>
+    <span class="c1"># </span>
+    <span class="c1">#  If there isn&#39;t anything in there, wait (blocking the calling process)</span>
+    <span class="c1">#  until something becomes available. If non-blocking reads are needed,</span>
+    <span class="c1">#  one should call @c any() to check for items before attempting to read</span>
+    <span class="c1">#  from the queue. This is usually done in a low priority task:</span>
+    <span class="c1">#  @code</span>
+    <span class="c1">#     def some_task ():</span>
+    <span class="c1">#         # Setup</span>
+    <span class="c1">#         while True:</span>
+    <span class="c1">#             if my_queue.any ():</span>
+    <span class="c1">#                 something = my_queue.get ()</span>
+    <span class="c1">#                 do_something_with (something)</span>
+    <span class="c1">#             # More loop stuff</span>
+    <span class="c1">#             yield 0</span>
+    <span class="c1">#  @endcode</span>
+    <span class="c1">#  @param in_ISR Set this to @c True if calling from within an ISR</span>
+    <span class="nd">@micropython</span><span class="o">.</span><span class="n">native</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get</span> <span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">in_ISR</span> <span class="o">=</span> <span class="kc">False</span><span class="p">):</span>
+        <span class="c1"># Wait until there&#39;s something in the queue to be returned</span>
+        <span class="k">while</span> <span class="bp">self</span><span class="o">.</span><span class="n">empty</span> <span class="p">():</span>
+            <span class="k">pass</span>
+
+        <span class="c1"># Prevent data corruption by blocking interrupts during data transfer</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_thread_protect</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">in_ISR</span><span class="p">:</span>
+            <span class="n">irq_state</span> <span class="o">=</span> <span class="n">pyb</span><span class="o">.</span><span class="n">disable_irq</span> <span class="p">()</span>
+
+        <span class="c1"># Get the item to be returned from the queue</span>
+        <span class="n">to_return</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_buffer</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">_rd_idx</span><span class="p">]</span>
+
+        <span class="c1"># Move the read pointer and adjust the number of items in the queue</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_rd_idx</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_rd_idx</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_size</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_rd_idx</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_num_items</span> <span class="o">-=</span> <span class="mi">1</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_num_items</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_num_items</span> <span class="o">=</span> <span class="mi">0</span>
+
+        <span class="c1"># Re-enable interrupts</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_thread_protect</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">in_ISR</span><span class="p">:</span>
+            <span class="n">pyb</span><span class="o">.</span><span class="n">enable_irq</span> <span class="p">(</span><span class="n">irq_state</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="p">(</span><span class="n">to_return</span><span class="p">)</span>
+
+
+    <span class="c1">## Check if there are any items in the queue.</span>
+    <span class="c1"># </span>
+    <span class="c1">#  Returns @c True if there are any items in the queue and @c False</span>
+    <span class="c1">#  if the queue is empty.</span>
+    <span class="c1">#  @return @c True if items are in the queue, @c False if not</span>
+    <span class="nd">@micropython</span><span class="o">.</span><span class="n">native</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">any</span> <span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_num_items</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span>
+
+
+    <span class="c1">## Check if the queue is empty.</span>
+    <span class="c1"># </span>
+    <span class="c1">#  Returns @c True if there are no items in the queue and @c False if </span>
+    <span class="c1">#  there are any items therein.</span>
+    <span class="c1">#  @return @c True if queue is empty, @c False if it&#39;s not empty</span>
+    <span class="nd">@micropython</span><span class="o">.</span><span class="n">native</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">empty</span> <span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_num_items</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">)</span>
+
+
+    <span class="c1">## Check if the queue is full.</span>
+    <span class="c1"># </span>
+    <span class="c1">#  This method returns @c True if the queue is already full and there</span>
+    <span class="c1">#  is no room for more data without overwriting existing data. </span>
+    <span class="c1">#  @return @c True if the queue is full</span>
+    <span class="nd">@micropython</span><span class="o">.</span><span class="n">native</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">full</span> <span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_num_items</span> <span class="o">&gt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_size</span><span class="p">)</span>
+
+
+    <span class="c1">## Check how many items are in the queue.</span>
+    <span class="c1"># </span>
+    <span class="c1">#  This method returns the number of items which are currently in the </span>
+    <span class="c1">#  queue.</span>
+    <span class="c1">#  @return The number of items in the queue</span>
+    <span class="nd">@micropython</span><span class="o">.</span><span class="n">native</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">num_in</span> <span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_num_items</span><span class="p">)</span>
+
+
+    <span class="c1">## Remove all contents from the queue.</span>
+<div class="viewcode-block" id="Queue.clear">
+<a class="viewcode-back" href="../task_share.html#task_share.Queue.clear">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">clear</span> <span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_rd_idx</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_wr_idx</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_num_items</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_max_full</span> <span class="o">=</span> <span class="mi">0</span></div>
+
+
+
+    <span class="c1">## This method puts diagnostic information about the queue into a string.</span>
+    <span class="c1"># </span>
+    <span class="c1">#  It shows the queue&#39;s name and type as well as the maximum number of</span>
+    <span class="c1">#  items and queue size. </span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__repr__</span> <span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">(</span><span class="s1">&#39;</span><span class="si">{:&lt;12s}</span><span class="s1"> Queue&lt;</span><span class="si">{:s}</span><span class="s1">&gt; Max Full </span><span class="si">{:d}</span><span class="s1">/</span><span class="si">{:d}</span><span class="s1">&#39;</span><span class="o">.</span><span class="n">format</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_name</span><span class="p">,</span>
+                <span class="n">type_code_strings</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">_type_code</span><span class="p">],</span> <span class="bp">self</span><span class="o">.</span><span class="n">_max_full</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_size</span><span class="p">))</span></div>
+
+
+
+<span class="c1"># ============================================================================</span>
+
+<span class="c1">## An item which holds data to be shared between tasks.</span>
+<span class="c1">#  This class implements a shared data item which can be protected against</span>
+<span class="c1">#  data corruption by pre-emptive multithreading. Multithreading which can</span>
+<span class="c1">#  corrupt shared data includes the use of ordinary interrupts as well as the</span>
+<span class="c1">#  use of pre-emptive multithreading such as by a Real-Time Operating System</span>
+<span class="c1">#  (RTOS).</span>
+<span class="c1"># </span>
+<span class="c1">#  An example of the creation and use of a share is as follows:</span>
+<span class="c1">#  @code</span>
+<span class="c1">#  import task_share</span>
+<span class="c1"># </span>
+<span class="c1">#  # This share holds a signed short (16-bit) integer</span>
+<span class="c1">#  my_share = task_share.Queue (&#39;h&#39;, name=&quot;My Share&quot;)</span>
+<span class="c1"># </span>
+<span class="c1">#  # Somewhere in one task, put data into the share</span>
+<span class="c1">#  my_share.put (some_data)</span>
+<span class="c1"># </span>
+<span class="c1">#  # In another task, read data from the share</span>
+<span class="c1">#  something = my_share.get ()</span>
+<span class="c1">#  @endcode</span>
+<div class="viewcode-block" id="Share">
+<a class="viewcode-back" href="../task_share.html#task_share.Share">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Share</span> <span class="p">(</span><span class="n">BaseShare</span><span class="p">):</span>
+
+    <span class="c1">## A counter used to give serial numbers to shares for diagnostic use.</span>
+    <span class="n">ser_num</span> <span class="o">=</span> <span class="mi">0</span>
+
+
+    <span class="c1">## Create a shared data item used to transfer data between tasks.</span>
+    <span class="c1"># </span>
+    <span class="c1">#  This method allocates memory in which the shared data will be buffered.</span>
+    <span class="c1"># </span>
+    <span class="c1">#  Each share can only carry data of one particular type which must be</span>
+    <span class="c1">#  chosen from the following list. The data type is specified by a </span>
+    <span class="c1">#  one-letter type code which is given as for the Python @c array.array</span>
+    <span class="c1">#  type, which can be any of the following:</span>
+    <span class="c1">#  |      |      |      |</span>
+    <span class="c1">#  |:-----|:-----|:-----|</span>
+    <span class="c1">#  | **b** (signed char) | **B** (unsigned char) | 8 bit integers |</span>
+    <span class="c1">#  | **h** (signed short) | **H** (unsigned short) | 16 bit integers |</span>
+    <span class="c1">#  | **i** (signed int) | **I** (unsigned int) | 32 bit integers (probably) |</span>
+    <span class="c1">#  | **l** (signed long) | **L** (unsigned long) | 32 bit integers |</span>
+    <span class="c1">#  | **q** (signed long long) | **Q** (unsigned long long) | 64 bit integers |</span>
+    <span class="c1">#  | **f** (float) | **d** (double-precision float) | |</span>
+    <span class="c1"># </span>
+    <span class="c1">#  @param type_code The type of data items which the share can hold</span>
+    <span class="c1">#  @param thread_protect True if mutual exclusion protection is used</span>
+    <span class="c1">#  @param name A short name for the share, default @c ShareN where @c N</span>
+    <span class="c1">#         is a serial number for the share</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span> <span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">type_code</span><span class="p">,</span> <span class="n">thread_protect</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span> <span class="n">name</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+        <span class="c1"># First call the parent class initializer</span>
+        <span class="nb">super</span> <span class="p">()</span><span class="o">.</span><span class="fm">__init__</span> <span class="p">(</span><span class="n">type_code</span><span class="p">,</span> <span class="n">thread_protect</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_buffer</span> <span class="o">=</span> <span class="n">array</span><span class="o">.</span><span class="n">array</span> <span class="p">(</span><span class="n">type_code</span><span class="p">,</span> <span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_name</span> <span class="o">=</span> <span class="nb">str</span> <span class="p">(</span><span class="n">name</span><span class="p">)</span> <span class="k">if</span> <span class="n">name</span> <span class="o">!=</span> <span class="kc">None</span> \
+            <span class="k">else</span> <span class="s1">&#39;Share&#39;</span> <span class="o">+</span> <span class="nb">str</span> <span class="p">(</span><span class="n">Share</span><span class="o">.</span><span class="n">ser_num</span><span class="p">)</span>
+        <span class="n">Share</span><span class="o">.</span><span class="n">ser_num</span> <span class="o">+=</span> <span class="mi">1</span>
+
+
+    <span class="c1">## Write an item of data into the share.</span>
+    <span class="c1"># </span>
+    <span class="c1">#  This method puts data into the share; any old data is overwritten.</span>
+    <span class="c1">#  This code disables interrupts during the writing so as to prevent</span>
+    <span class="c1">#  data corrupting by an interrupt service routine which might access</span>
+    <span class="c1">#  the same data.</span>
+    <span class="c1">#  @param data The data to be put into this share</span>
+    <span class="c1">#  @param in_ISR Set this to True if calling from within an ISR</span>
+    <span class="nd">@micropython</span><span class="o">.</span><span class="n">native</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">put</span> <span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="n">in_ISR</span> <span class="o">=</span> <span class="kc">False</span><span class="p">):</span>
+
+        <span class="c1"># Disable interrupts before writing the data</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_thread_protect</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">in_ISR</span><span class="p">:</span>
+            <span class="n">irq_state</span> <span class="o">=</span> <span class="n">pyb</span><span class="o">.</span><span class="n">disable_irq</span> <span class="p">()</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_buffer</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">=</span> <span class="n">data</span>
+
+        <span class="c1"># Re-enable interrupts</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_thread_protect</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">in_ISR</span><span class="p">:</span>
+            <span class="n">pyb</span><span class="o">.</span><span class="n">enable_irq</span> <span class="p">(</span><span class="n">irq_state</span><span class="p">)</span>
+
+
+    <span class="c1">## Read an item of data from the share.</span>
+    <span class="c1"># </span>
+    <span class="c1">#  If thread protection is enabled, interrupts are disabled during the time</span>
+    <span class="c1">#  that the data is being read so as to prevent data corruption by changes</span>
+    <span class="c1">#  in the data as it is being read. </span>
+    <span class="c1">#  @param in_ISR Set this to True if calling from within an ISR</span>
+    <span class="nd">@micropython</span><span class="o">.</span><span class="n">native</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get</span> <span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">in_ISR</span> <span class="o">=</span> <span class="kc">False</span><span class="p">):</span>
+        <span class="c1"># Disable interrupts before reading the data</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_thread_protect</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">in_ISR</span><span class="p">:</span>
+            <span class="n">irq_state</span> <span class="o">=</span> <span class="n">pyb</span><span class="o">.</span><span class="n">disable_irq</span> <span class="p">()</span>
+
+        <span class="n">to_return</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_buffer</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+        <span class="c1"># Re-enable interrupts</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_thread_protect</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">in_ISR</span><span class="p">:</span>
+            <span class="n">pyb</span><span class="o">.</span><span class="n">enable_irq</span> <span class="p">(</span><span class="n">irq_state</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="p">(</span><span class="n">to_return</span><span class="p">)</span>
+
+
+    <span class="c1">## Puts diagnostic information about the share into a string.</span>
+    <span class="c1">#</span>
+    <span class="c1">#  Shares are pretty simple, so we just put the name and type. </span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__repr__</span> <span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">(</span><span class="s2">&quot;</span><span class="si">{:&lt;12s}</span><span class="s2"> Share&lt;</span><span class="si">{:s}</span><span class="s2">&gt;&quot;</span><span class="o">.</span><span class="n">format</span> <span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_name</span><span class="p">,</span>
+                <span class="n">type_code_strings</span><span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">_type_code</span><span class="p">]))</span></div>
+
+
+
+</pre></div>
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../index.html">405 Project</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../index.html">Documentation overview</a><ul>
+  <li><a href="index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;2026, Fredy Herrarte and Ethan Liu.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 9.1.0</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>

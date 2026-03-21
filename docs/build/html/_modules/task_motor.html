@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>task_motor &#8212; 405 Project 1.0 documentation</title>
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="../_static/basic.css?v=b08954a9" />
+    <link rel="stylesheet" type="text/css" href="../_static/alabaster.css?v=27fed22d" />
+    <script src="../_static/documentation_options.js?v=f2a433a1"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+   
+  <link rel="stylesheet" href="../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <h1>Source code for task_motor</h1><div class="highlight"><pre>
+<span></span><span class="c1"># task_motor.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">motor_driver</span><span class="w"> </span><span class="kn">import</span> <span class="n">motor_driver</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">task_share</span><span class="w"> </span><span class="kn">import</span> <span class="n">Share</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">micropython</span>
+
+<span class="n">S0_INIT</span> <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">S1_WAIT</span> <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">S2_RUN</span>  <span class="o">=</span> <span class="n">micropython</span><span class="o">.</span><span class="n">const</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+
+<div class="viewcode-block" id="task_motor">
+<a class="viewcode-back" href="../task_motor.html#task_motor.task_motor">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">task_motor</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">    Motor actuation task.</span>
+
+<span class="sd">    Safety additions:</span>
+<span class="sd">      - armEnable Share: motors will ONLY run if armEnable.get() is True AND goFlag is True.</span>
+<span class="sd">      - effort_cmd Share is assumed to contain float; if None, treated as 0.</span>
+
+<span class="sd">    Direction:</span>
+<span class="sd">      - invert=True flips effort sign in software.</span>
+
+<span class="sd">    FIX: _safe_off() was previously called every single tick while in S1_WAIT.</span>
+<span class="sd">    This meant that even after arm+go flags were set by the user task, the very</span>
+<span class="sd">    next scheduler tick would call disable() again before the motor could start,</span>
+<span class="sd">    making it impossible to restart after the first run. _safe_off() is now only</span>
+<span class="sd">    called ONCE on entry to S1_WAIT (i.e. when transitioning INTO it from S0 or</span>
+<span class="sd">    S2), not on every subsequent tick.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">mot</span><span class="p">:</span> <span class="n">motor_driver</span><span class="p">,</span> <span class="n">goFlag</span><span class="p">:</span> <span class="n">Share</span><span class="p">,</span> <span class="n">effort_cmd</span><span class="p">:</span> <span class="n">Share</span><span class="p">,</span> <span class="n">armEnable</span><span class="p">:</span> <span class="n">Share</span><span class="p">,</span> <span class="n">invert</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S0_INIT</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_mot</span> <span class="o">=</span> <span class="n">mot</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_goFlag</span> <span class="o">=</span> <span class="n">goFlag</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_effort_cmd</span> <span class="o">=</span> <span class="n">effort_cmd</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_arm</span> <span class="o">=</span> <span class="n">armEnable</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_invert</span> <span class="o">=</span> <span class="nb">bool</span><span class="p">(</span><span class="n">invert</span><span class="p">)</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s2">&quot;Motor Task instantiated&quot;</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_safe_off</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_mot</span><span class="o">.</span><span class="n">set_effort</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+            <span class="k">pass</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_mot</span><span class="o">.</span><span class="n">disable</span><span class="p">()</span>
+        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+            <span class="k">pass</span>
+
+<div class="viewcode-block" id="task_motor.run">
+<a class="viewcode-back" href="../task_motor.html#task_motor.task_motor.run">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">S0_INIT</span><span class="p">:</span>
+                <span class="c1"># Disable once at startup then wait</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_safe_off</span><span class="p">()</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S1_WAIT</span>
+
+            <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">S1_WAIT</span><span class="p">:</span>
+                <span class="c1"># Do NOT call _safe_off() here every tick — that would</span>
+                <span class="c1"># continuously disable the hardware and prevent restart.</span>
+                <span class="c1"># Hardware was already shut down when we entered this state</span>
+                <span class="c1"># (either from S0_INIT above or from S2_RUN below).</span>
+
+                <span class="c1"># Transition to running as soon as both flags are set</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_arm</span><span class="o">.</span><span class="n">get</span><span class="p">()</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">_goFlag</span><span class="o">.</span><span class="n">get</span><span class="p">():</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_mot</span><span class="o">.</span><span class="n">enable</span><span class="p">()</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S2_RUN</span>
+
+            <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">==</span> <span class="n">S2_RUN</span><span class="p">:</span>
+                <span class="c1"># If disarmed or stop requested, shut down and go back to wait</span>
+                <span class="k">if</span> <span class="p">(</span><span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_arm</span><span class="o">.</span><span class="n">get</span><span class="p">())</span> <span class="ow">or</span> <span class="p">(</span><span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_goFlag</span><span class="o">.</span><span class="n">get</span><span class="p">()):</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_safe_off</span><span class="p">()</span>          <span class="c1"># shut down once on exit</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_state</span> <span class="o">=</span> <span class="n">S1_WAIT</span>
+                    <span class="k">yield</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span>
+                    <span class="k">continue</span>
+
+                <span class="n">cmd</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_effort_cmd</span><span class="o">.</span><span class="n">get</span><span class="p">()</span>
+                <span class="k">if</span> <span class="n">cmd</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                    <span class="n">cmd</span> <span class="o">=</span> <span class="mf">0.0</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_invert</span><span class="p">:</span>
+                    <span class="n">cmd</span> <span class="o">=</span> <span class="o">-</span><span class="n">cmd</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_mot</span><span class="o">.</span><span class="n">set_effort</span><span class="p">(</span><span class="n">cmd</span><span class="p">)</span>
+
+            <span class="k">yield</span> <span class="bp">self</span><span class="o">.</span><span class="n">_state</span></div>
+</div>
+
+</pre></div>
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../index.html">405 Project</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../index.html">Documentation overview</a><ul>
+  <li><a href="index.html">Module code</a><ul>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;2026, Fredy Herrarte and Ethan Liu.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 9.1.0</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>

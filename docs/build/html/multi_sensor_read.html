@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="./">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>multi_sensor_read module &#8212; 405 Project 1.0 documentation</title>
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=5ecbeea2" />
+    <link rel="stylesheet" type="text/css" href="_static/basic.css?v=b08954a9" />
+    <link rel="stylesheet" type="text/css" href="_static/alabaster.css?v=27fed22d" />
+    <script src="_static/documentation_options.js?v=f2a433a1"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+   
+  <link rel="stylesheet" href="_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="module-multi_sensor_read">
+<span id="multi-sensor-read-module"></span><h1>multi_sensor_read module<a class="headerlink" href="#module-multi_sensor_read" title="Link to this heading">¶</a></h1>
+<p>Multi-sensor IR reflectance array reader.</p>
+<p>ROOT CAUSE FIX: The original version used ADC.read_timed_multi(), which is a
+BLOCKING call that waits for the hardware timer to fire buf_size samples before
+returning. At freq=100 Hz that means every sensor read blocked the CPU for ~10 ms.
+With a 20 ms task period the sensor task was consuming 50% of CPU time in a single
+uninterruptible call, starving every other task and making the scheduler appear frozen.</p>
+<p>This version uses individual ADC.read() calls instead. Each call returns the
+most recently converted value instantly (the STM32 ADC runs continuously in
+background). The readings are taken sequentially in a tight Python loop; at
+~168 MHz the inter-sample skew across 11 sensors is well under 1 µs, which is
+negligible for a line sensor running at 50–100 Hz.</p>
+<p>The Timer and buf_size arguments are kept in the constructor signature so
+existing call-sites don’t need to change, but they are no longer used.</p>
+<dl class="py class">
+<dt class="sig sig-object py" id="multi_sensor_read.multiple_ir_readings">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">multi_sensor_read.</span></span><span class="sig-name descname"><span class="pre">multiple_ir_readings</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">pins</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">timer_id</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">8</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">freq</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">100</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">buf_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="_modules/multi_sensor_read.html#multiple_ir_readings"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#multi_sensor_read.multiple_ir_readings" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>N-sensor IR array interface with non-blocking ADC reads.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="multi_sensor_read.multiple_ir_readings.read">
+<span class="sig-name descname"><span class="pre">read</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="_modules/multi_sensor_read.html#multiple_ir_readings.read"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#multi_sensor_read.multiple_ir_readings.read" title="Link to this definition">¶</a></dt>
+<dd><p>Read all sensors instantly using individual ADC.read() calls.</p>
+<p>Each call returns the most recent background-converted value with no
+blocking. The STM32 ADC runs in continuous-conversion mode, so the
+value is always fresh within one conversion cycle (~1 µs at 12-bit).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>List of raw ADC values [s0, s1, …, sN-1]  (integers 0–4095)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>list[int]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="index.html">405 Project</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;2026, Fredy Herrarte and Ethan Liu.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 9.1.0</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+      |
+      <a href="_sources/multi_sensor_read.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>
