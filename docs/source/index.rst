@@ -1,50 +1,81 @@
-.. 405 Project documentation master file, created by
-   sphinx-quickstart on Fri Mar 20 13:49:28 2026.
-   You can adapt this file completely to your liking, but it should at least
-   contain the root `toctree` directive.
+.. raw:: html
 
-405 Project Documentation
-=========================
+   <div class="hero-banner">
+     <h1>Romi Autonomous Robot</h1>
+     <p class="subtitle">
+       ME405 Term Project — Cal Poly SLO, Spring 2026<br>
+       Fredy Herrarte &amp; Ethan Liu
+     </p>
+     <span class="hero-badge">MicroPython</span>
+     <span class="hero-badge">STM32 Nucleo-L476RG</span>
+     <span class="hero-badge">Cooperative Multitasking</span>
+     <span class="hero-badge">Luenberger Observer</span>
+     <span class="hero-badge">Line Following</span>
+   </div>
 
-Welcome to the documentation for the 405 autonomous robot project.
+Overview
+========
 
-This site provides an overview of the system architecture, hardware interfaces,
-control strategy, and module-level implementation details for the embedded
-robotics software.
+This project implements a fully autonomous mobile robot on the **Pololu Romi** chassis.
+The software runs on a bare-metal STM32 microcontroller using MicroPython and a
+hand-written cooperative scheduler — no RTOS required.
 
-Project Summary
----------------
+The robot can:
 
-This project implements an autonomous mobile robot capable of:
+- Follow a black line using a 7-element IR reflectance array and weighted-centroid steering
+- Stabilize heading with a BNO055 IMU (yaw-rate damping + heading hold)
+- Estimate its full state (position, heading, wheel speeds) using a discretized Luenberger observer
+- Detect obstacles with six bump sensors and execute an autonomous avoidance maneuver
+- Navigate a complete obstacle course autonomously via a 14-state finite state machine
+- Stream live telemetry over Bluetooth to a PuTTY terminal at 115,200 baud
 
-- Following a black line using an IR reflectance sensor array
-- Measuring wheel motion with quadrature encoders
-- Estimating heading and motion using IMU and observer-based estimation
-- Controlling motors through PWM-based differential drive
-- Running multiple real-time subsystems using a cooperative task scheduler
+.. raw:: html
 
-Documentation Contents
-----------------------
+   <div class="stats-grid">
+     <div class="stat-card">
+       <span class="stat-num">7</span>
+       <span class="stat-label">Concurrent Tasks</span>
+     </div>
+     <div class="stat-card">
+       <span class="stat-num">50 Hz</span>
+       <span class="stat-label">Control Rate</span>
+     </div>
+     <div class="stat-card">
+       <span class="stat-num">4×4</span>
+       <span class="stat-label">Observer Matrix</span>
+     </div>
+     <div class="stat-card">
+       <span class="stat-num">14</span>
+       <span class="stat-label">FSM States</span>
+     </div>
+     <div class="stat-card">
+       <span class="stat-num">18+</span>
+       <span class="stat-label">Python Modules</span>
+     </div>
+   </div>
+
+Quick Start
+-----------
+
+1. Flash all ``.py`` files to the Nucleo's filesystem via **Thonny** or ``rshell``.
+2. Connect a PuTTY terminal to the HC-05 Bluetooth COM port at **115,200 baud**.
+3. Press the blue user button (PC13) on the Nucleo, or send ``o`` over Bluetooth, to start the obstacle course.
+4. Send ``f`` to run a timed line-follow tuning run. Send any other key to stop.
+
+.. tip::
+   Run ``bt_config.py`` once (with nothing else connected) to set the HC-05 name,
+   password, and baud rate before first use.
+
+----
 
 .. toctree::
    :maxdepth: 2
-   :caption: Contents:
+   :caption: Documentation
 
-   overview
    architecture
    hardware
-   software
+   software/index
+   observer
    control
-
-API Reference
--------------
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Module Reference:
-
-   modules/motor
-   modules/sensors
-   modules/control
-   modules/estimator
-   modules/tasks
+   navigation
+   api/index
